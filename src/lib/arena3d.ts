@@ -4,6 +4,7 @@ import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { ARENA, ARENA_SCALE, DEFAULT_ARENA_ID, FLIGHT_SCALE, GROUND, JET_FLIGHT, METERS_PER_UNIT, PROJECTILE_SPEED, TOWER, type ArenaId, type JetModel, type ProjectileKind, type RoomState, type Team } from '@/lib/protocol';
 import { createParticleField } from '@/lib/particles';
 import { sfx } from '@/lib/sfx';
@@ -14,6 +15,65 @@ import {
 import { buildSkyforge, type ArenaLighting, type SkyforgeHandle } from '@/lib/skyforge';
 import { attachTrails, detachTrails, makeJet, updateJet } from '@/lib/jets';
 import { buildStations, buildTower, disposeTree, flashGroundUnit, makeGroundUnit, setRepairBeam, updateGroundUnit, type TowerObject } from '@/lib/defences';
+import { spawnPoint } from '@/lib/match';
+import { MAX_TEAM_SIZE } from '@/lib/protocol';
+
+/**
+ * The Sudden Death safe zone: one open cylinder from the deck to above the
+ * ceiling, scaled to the zone's radius each frame. Faint hazard stripes,
+ * bands climbing it and bright rims at the deck and the top, so the edge
+ * reads from anywhere in the bowl without hiding what's beyond it.
+ */
+function buildZoneWall(scene: THREE.Scene) {
+  const material = new THREE.ShaderMaterial({
+    uniforms: { time: { value: 0 }, strength: { value: 0 }, color: { value: new THREE.Color('#ff5a3c') } },
+    vertexShader: `varying vec2 vUv;
+      void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+    fragmentShader: `uniform float time;
+      uniform float strength;
+      uniform vec3 color;
+      varying vec2 vUv;
+      void main() {
+        float climb = fract(vUv.y * 22.0 - time * 0.45);
+        float band = smoothstep(0.0, 0.06, climb) * (1.0 - smoothstep(0.06, 0.16, climb));
+        float stripe = step(0.5, fract(vUv.x * 220.0 + vUv.y * 14.0));
+        float rim = 1.0 - smoothstep(0.0, 0.035, vUv.y) + smoothstep(0.93, 1.0, vUv.y);
+        float alpha = (0.035 + stripe * 0.035 + band * 0.16 + rim * 0.55) * strength;
+        gl_FragColor = vec4(color * (1.0 + band * 1.5 + rim * 2.0), clamp(alpha, 0.0, 1.0));
+      }`,
+    transparent: true, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending,
+  });
+  const mesh = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 1, 160, 1, true).translate(0, .5, 0), material);
+  mesh.visible = false;
+  mesh.frustumCulled = false;
+  mesh.renderOrder = 10;
+  scene.add(mesh);
+  return { mesh, material };
+}
+
+/**
+ * Five launch gates per team: a team-coloured ring at each spawn point, facing
+ * down the stadium, so players can see where each squadron enters. All five
+ * share one merged mesh per team.
+ */
+function buildSpawnGates(scene: THREE.Scene) {
+  for (const team of ['azure', 'ember'] as const) {
+    const parts: THREE.BufferGeometry[] = [];
+    for (let slot = 0; slot < MAX_TEAM_SIZE; slot += 1) {
+      const point = spawnPoint(team, slot);
+      const ring = new THREE.TorusGeometry(60 * FLIGHT_SCALE, 2.6 * FLIGHT_SCALE, 6, 48);
+      const struts = new THREE.BoxGeometry(124 * FLIGHT_SCALE, 1.6 * FLIGHT_SCALE, 1.6 * FLIGHT_SCALE);
+      for (const piece of [ring, struts]) {
+        piece.rotateY(point.yaw).translate(point.x, point.y, point.z);
+        parts.push(piece.index ? piece.toNonIndexed() : piece);
+      }
+    }
+    const geometry = mergeGeometries(parts.map((part) => { part.deleteAttribute('uv'); return part; }));
+    parts.forEach((part) => part.dispose());
+    const mesh = new THREE.Mesh(geometry, new THREE.MeshBasicMaterial({ color: TEAM_COLORS[team], transparent: true, opacity: .5, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+    scene.add(mesh);
+  }
+}
 
 /** The two airfields at each end are scenery; the towers are the objective. */
 type AirportSpot = { id: string; team: Team; x: number; z: number };
@@ -466,6 +526,7 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
     { id: 'ember-south', team: 'ember', x: 360 * ARENA_SCALE, z: 145 * ARENA_SCALE },
   ];
   const towerObjects = new Map<string, TowerObject>();
+  const zoneWall = buildZoneWall(scene);
   let stationSet: ReturnType<typeof buildStations> | undefined;
   let towerLayoutKey = '';
   // Projectiles share geometry and materials (flak fires ten rounds a second
@@ -608,6 +669,7 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
         ? buildSkyforge(scene, surfaceMaps, lighting)
         : buildOpenRange(scene, arenaId, surfaceMaps);
       for (const base of previewBases) baseObjects.set(base.id, buildAirport(scene, base, surfaceMaps));
+      buildSpawnGates(scene);
       previewJets = mode === 'training' ? [] : [
         // Anchored a fixed distance in front of the lobby camera (not scaled
         // with the arena), so the airframes stay on show at any stadium size.
@@ -731,6 +793,11 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
         if (seenEventIds.size > 256) seenEventIds.delete(seenEventIds.values().next().value as string);
         if (event.type === 'boundary') { stadium?.signalBoundary(event.x, event.y, event.z); continue; }
         if (event.x === undefined || event.y === undefined || event.z === undefined) continue;
+        if ((event.type === 'tower-hit' || event.type === 'tower-critical') && event.targetId) {
+          // Emergency lighting on the tower and around the bowl while it's under attack.
+          towerObjects.get(event.targetId)?.alert(now);
+          stadium?.raiseAlarm(1_800);
+        }
         if (event.type === 'tower-down') {
           // Blasts walk down the shaft over ~2.5 s, the alarm sounds and sparks shower the deck.
           stadium?.raiseAlarm(6_000);
@@ -778,6 +845,15 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
           if (Math.random() < frameDelta * 3) towerSmoke.emit(tower.x, TOWER.height * (.4 + Math.random() * .5), tower.z, (Math.random() - .5) * 20 * ARENA_SCALE, 10 * ARENA_SCALE, (Math.random() - .5) * 20 * ARENA_SCALE, 4, .25, .25, .27, .35);
           if (Math.random() < frameDelta * 1.6) sparksAt(tower.x + (Math.random() - .5) * TOWER.radius * 1.6, TOWER.height * (.3 + Math.random() * .6), tower.z + (Math.random() - .5) * TOWER.radius * 1.6, 14, 90 * FLIGHT_SCALE);
         }
+      }
+      const zone = snapshot.zone;
+      zoneWall.mesh.visible = Boolean(zone);
+      if (zone) {
+        zoneWall.mesh.position.set(zone.x, 0, zone.z);
+        zoneWall.mesh.scale.set(zone.radius, ARENA.maxAltitude * 1.15, zone.radius);
+        zoneWall.material.uniforms.time.value = now / 1_000;
+        const target = zone.shrinking ? 1 + Math.sin(now * .006) * .25 : zone.closesIn > 0 ? .55 : .9;
+        zoneWall.material.uniforms.strength.value += (target - zoneWall.material.uniforms.strength.value) * damp(3, frameDelta);
       }
       for (let index = destruction.length - 1; index >= 0; index -= 1) {
         const blast = destruction[index];

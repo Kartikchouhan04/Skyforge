@@ -52,6 +52,22 @@ export function RadarScope({ readState, readSelfId }: { readState: () => RoomSta
       const self = state.players.find((player) => player.id === selfId);
       const myTeam = self?.team ?? 'azure';
 
+      // Sudden Death safe zone: where it is now, and faintly, where it closes to.
+      if (state.zone) {
+        const { zone } = state;
+        context.save();
+        context.beginPath(); context.rect(0, 0, width, height); context.clip();
+        context.strokeStyle = 'rgba(255, 140, 90, .35)';
+        context.setLineDash([2, 4]);
+        context.beginPath(); context.arc(toX(zone.x), toY(zone.z), zone.endRadius * scale, 0, Math.PI * 2); context.stroke();
+        context.setLineDash([]);
+        context.strokeStyle = zone.shrinking ? `rgba(255, 90, 70, ${.65 + Math.sin(now / 160) * .3})` : 'rgba(255, 170, 110, .85)';
+        context.lineWidth = 1.6;
+        context.beginPath(); context.arc(toX(zone.x), toY(zone.z), zone.radius * scale, 0, Math.PI * 2); context.stroke();
+        context.lineWidth = 1;
+        context.restore();
+      }
+
       for (const station of state.stations) {
         context.fillStyle = station.occupantId ? COLORS[station.team] : 'rgba(200, 220, 230, .35)';
         context.fillRect(toX(station.x) - 1.5, toY(station.z) - 1.5, 3, 3);

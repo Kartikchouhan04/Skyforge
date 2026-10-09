@@ -254,3 +254,49 @@
 .hangar-card h2 { color: #eef6f9; }
 .role-select button { height: 38px; }
 .role-select button small { display: none; }
+
+/* Round 11 — Sudden Death. */
+.sudden-death-card {
+  position: absolute; z-index: 5; left: 50%; top: 27%; transform: translate(-50%, -50%); width: min(620px, 92vw);
+  display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 20px 16px; pointer-events: none; text-align: center;
+  background: linear-gradient(90deg, rgba(20, 70, 110, .88), rgba(60, 6, 14, .92) 50%, rgba(110, 16, 30, .88));
+  border-top: 2px solid #ff5b4d; border-bottom: 2px solid #ff5b4d;
+  animation: sudden-death-in .5s cubic-bezier(.2, .9, .3, 1.2) both;
+}
+.sudden-death-card span { color: #ffcf86; font: 700 12px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.16em; }
+.sudden-death-card strong { color: #fff; font: 800 clamp(48px, 8vw, 84px)/1 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.06em; text-shadow: 0 0 26px rgba(255, 70, 60, .75); }
+.sudden-death-card p { margin: 0; color: #f1d9d6; font: 12px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.05em; line-height: 1.4; }
+@keyframes sudden-death-in { from { opacity: 0; transform: translate(-50%, -50%) scale(1.25); } }
+.prep-panel.prep-sudden { top: 60%; border-color: rgba(255, 91, 77, .45); }
+.prep-panel.prep-sudden .prep-kicker { color: #ff8c80; }
+.combat-countdown.sudden-death span { color: #ff8c80; }
+.combat-countdown.sudden-death b { color: #fff; text-shadow: 0 0 34px rgba(255, 70, 60, .85); }
+
+.tower-status-row .zone-status {
+  grid-column: 1 / 4; display: grid; grid-template-columns: 1fr 1fr; gap: 2px 14px; padding: 6px 10px;
+  background: rgba(6, 12, 20, .78); border: 1px solid rgba(255, 140, 128, .3);
+}
+.zone-status.closing { border-color: #ff5b4d; }
+.zone-survivors { display: flex; align-items: baseline; justify-content: center; gap: 10px; }
+.zone-survivors span { color: #8fa3b0; font: 700 10px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.1em; }
+.zone-survivors b { font: 800 26px/1 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif; }
+.zone-survivors i { font: 700 13px 'Barlow', 'Segoe UI', system-ui, sans-serif; font-style: normal; }
+.zone-status small { grid-column: 1 / 3; text-align: center; color: #ffcf86; font: 700 11px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.08em; }
+.zone-status.closing small { color: #ff8c80; }
+
+.zone-warning {
+  position: absolute; z-index: 4; left: 50%; top: calc(51% + 80px); transform: translateX(-50%); padding: 6px 16px; pointer-events: none; white-space: nowrap;
+  background: rgba(110, 30, 6, .82); border: 1px solid #ff8a3d; color: #ffe6d4;
+  font: 700 13px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.08em;
+  animation: flight-warning-blink .6s steps(2, start) infinite;
+}
+.zone-warning b { margin-left: 8px; color: #ffb37a; }
+
+.results-screen.sudden-death-victory .results-kicker { color: #ff8c80; letter-spacing: 0.2em; }
+.results-screen.sudden-death-victory > strong { text-shadow: 0 0 34px rgba(255, 90, 70, .55); }
+.results-screen p.results-decider { margin: -4px 0 4px; color: #ffcf86; font-weight: 700; }
+
+@media (max-width: 760px) {
+  .sudden-death-card { top: 22%; }
+  .zone-warning { white-space: normal; width: min(92vw, 420px); text-align: center; }
+}

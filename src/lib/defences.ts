@@ -44,6 +44,8 @@ export type TowerObject = {
   update(tower: TowerState, dt: number, now: number): void;
   /** The Weapons Tower's turret swings to where it just fired. */
   fired(yaw: number, pitch: number, now: number): void;
+  /** Under attack: emergency lighting (fast red strobe on the beacon and shaft glow) for a few seconds. */
+  alert(now: number): void;
   dispose(): void;
 };
 
@@ -191,7 +193,7 @@ export function buildTower(scene: THREE.Scene, tower: TowerState, surfaces: Surf
   const base = new THREE.Color(teamColor);
   const hurt = new THREE.Color('#ff3b2f');
   const barrierColor = new THREE.Color('#fff3c4');
-  let aimYaw = 0; let aimPitch = .3; let lastShot = 0;
+  let aimYaw = 0; let aimPitch = .3; let lastShot = 0; let alertUntil = 0;
   return {
     group,
     update(state, dt, now) {
@@ -226,11 +228,17 @@ export function buildTower(scene: THREE.Scene, tower: TowerState, surfaces: Surf
         spinner.rotation.y += dt * (tower.kind === 'radar' ? 1.6 : .8);
       }
       const critical = health < TOWER.critical;
+      const underAttack = now < alertUntil;
       const flicker = critical ? (Math.sin(now * .04) > 0 ? 1 : .3) : 1;
-      glow.color.copy(base).lerp(hurt, 1 - health).multiplyScalar((.5 + health * 1.3) * flicker);
-      beaconMaterial.color.copy(critical ? hurt : base).multiplyScalar(1.5 + Math.sin(now * (critical ? .03 : .006)) * .8);
+      glow.color.copy(base).lerp(hurt, underAttack ? Math.max(.6, 1 - health) : 1 - health).multiplyScalar((.5 + health * 1.3) * flicker);
+      if (underAttack) {
+        // Emergency strobe: hard red double-flash.
+        const strobe = Math.sin(now * .05) > .2 ? 3.2 : .25;
+        beaconMaterial.color.copy(hurt).multiplyScalar(strobe);
+      } else beaconMaterial.color.copy(critical ? hurt : base).multiplyScalar(1.5 + Math.sin(now * (critical ? .03 : .006)) * .8);
     },
     fired(yaw, pitch, now) { aimYaw = yaw; aimPitch = pitch; lastShot = now; },
+    alert(now) { alertUntil = Math.max(alertUntil, now + 3_000); },
     dispose() {
       scene.remove(group);
       disposeTree(group);

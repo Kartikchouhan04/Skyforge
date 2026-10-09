@@ -1,8 +1,8 @@
 import {
   ARENA, ARENA_SCALE, COMBAT, FLIGHT_SCALE, GRAVITY, METERS_PER_UNIT, COMBAT_COUNTDOWN_SECONDS, DEFENDER_PILOTS, GROUND, GROUND_LOADOUTS, LOBBY_SECONDS, MAX_ROUNDS, MAX_TEAM_SIZE, PREP_SECONDS,
-  PROJECTILE_SPEED, REGULATION_ROUNDS, ROUNDS_PER_HALF, ROUND_SECONDS, TEAM_NAMES, TIEBREAKER_SECONDS, TOWER, WINS_NEEDED, otherTeam, towerLayout,
+  PROJECTILE_SPEED, REGULATION_ROUNDS, ROUNDS_PER_HALF, ROUND_SECONDS, SUDDEN_DEATH, TEAM_NAMES, TIEBREAKER_SECONDS, TOWER, WINS_NEEDED, otherTeam, towerLayout,
   type ArenaId, type CombatEvent, type GroundLoadout, type JetModel, type JetState, type MatchPhase, type PlayerInput, type ProjectileKind, type ProjectileState,
-  type Role, type RolePreference, type RoomState, type RoundKind, type RoundRecord, type StationState, type Team, type TowerState,
+  type Role, type RolePreference, type RoomState, type RoundKind, type RoundRecord, type StationState, type Team, type TowerState, type ZoneState,
 } from './protocol';
 import { initFlight, noseOf, stepFlight } from './flight';
 
@@ -34,6 +34,7 @@ export type MatchPlayer = JetState & {
   /** After an interrupted repair, R must be released before a new one can start. */
   repairLatch: boolean;
   boundaryAlertAt: number;
+  zoneAlertAt: number;
   /** Which wing pylon the next missile comes off. */
   pylon: number;
   transitFrom: { x: number; z: number };
@@ -43,6 +44,13 @@ export type MatchPlayer = JetState & {
 
 type MatchProjectile = ProjectileState & { vx: number; vy: number; vz: number; life: number; damage: number; turn: number; age: number; losYaw?: number; losPitch?: number };
 type MatchTower = TowerState & { defenceReadyAt: number; barrierUntil: number };
+
+/**
+ * One line per decided round, kept for the server to log. The result is
+ * decided here, on the server's tick, never by a client: this is the record
+ * to check if anyone disputes a draw or a Sudden Death result.
+ */
+export type RoundAudit = RoundRecord & { at: number; alive: Record<Team, number>; health: Record<Team, number> };
 
 export type MatchRoom = {
   code: string;
@@ -72,6 +80,12 @@ export type MatchRoom = {
   events: CombatEvent[];
   sequence: number;
   joins: number;
+  /** Simulation ticks stepped so far: round results record the tick they were decided on. */
+  tick: number;
+  /** When weapons went live this round (the Sudden Death zone times from it). */
+  combatStartedAt: number;
+  zoneWarned: boolean;
+  audit: RoundAudit[];
 };
 
 const NEUTRAL_INPUT: PlayerInput = { pitch: 0, yaw: 0, roll: 0, throttle: 0, boost: false, airBrake: false, primary: false, secondary: false };
@@ -99,6 +113,7 @@ export function createMatchRoom(code: string, arenaId: ArenaId, practice = false
     players: new Map(), towers: [], stations: [], projectiles: [],
     roundWins: { azure: 0, ember: 0 }, roundWinner: null, matchWinner: null, history: [],
     lobbyStartsAt: 0, prepEndsAt: 0, countdownAt: 0, intermissionAt: 0, roundEndsAt: 0, resultsUntil: 0, events: [], sequence: 0, joins: 0,
+    tick: 0, combatStartedAt: 0, zoneWarned: false, audit: [],
   };
 }
 
@@ -143,7 +158,7 @@ export function addPlayer(room: MatchRoom, options: { id: string; name: string; 
     loadout: options.loadout ?? 'balanced', flakAmmo: 0, samAmmo: 0, barrierCooldown: 0,
     spotted: false, damage: 0, towerDamage: 0, repaired: 0,
     input: { ...NEUTRAL_INPUT }, preference: options.preference ?? 'any', joinOrder: room.joins++,
-    cannonReadyAt: 0, missileReadyAt: 0, repairReadyAt: 0, barrierReadyAt: 0, repairLatch: false, boundaryAlertAt: 0, pylon: 1,
+    cannonReadyAt: 0, missileReadyAt: 0, repairReadyAt: 0, barrierReadyAt: 0, repairLatch: false, boundaryAlertAt: 0, zoneAlertAt: 0, pylon: 1,
     transitFrom: { x: 0, z: 0 }, transitTo: { x: 0, z: 0 }, transitTotal: 0,
   };
   initFlight(player, point.yaw);
@@ -285,26 +300,33 @@ function setUpRound(room: MatchRoom, now: number) {
   const label = `ROUND ${room.round}${room.overtime ? ` · OVERTIME ${room.overtime}` : ''}`;
   emit(room, 'prep', defender
     ? `${label} — PREPARE · ${TEAM_NAMES[otherTeam(defender)]} ATTACKS · ${TEAM_NAMES[defender]} DEFENDS`
-    : `${label} — PREPARE · TIEBREAKER 5V5 DOGFIGHT`, { round: room.round });
+    : `${label} — SUDDEN DEATH · ALL JETS · LAST SQUADRON FLYING WINS`, { round: room.round });
 }
 
 function beginCombat(room: MatchRoom, now: number) {
   room.phase = 'active';
   room.roundEndsAt = now + (room.defender ? ROUND_SECONDS : TIEBREAKER_SECONDS) * 1_000;
+  room.combatStartedAt = now;
+  room.zoneWarned = false;
   for (const player of room.players.values()) { player.cannonReadyAt = now; player.missileReadyAt = now; }
-  emit(room, 'round-start', `ROUND ${room.round}${room.overtime ? ` OT${room.overtime}` : ''} — WEAPONS FREE`, { round: room.round });
+  emit(room, 'round-start', room.defender
+    ? `ROUND ${room.round}${room.overtime ? ` OT${room.overtime}` : ''} — WEAPONS FREE`
+    : `SUDDEN DEATH${room.overtime ? ` · OVERTIME ${room.overtime}` : ''} — WEAPONS FREE`, { round: room.round });
 }
 
 function endRound(room: MatchRoom, winner: Team | null, reason: string, now: number) {
   if (room.phase !== 'active' || room.practice) return;
   room.roundWinner = winner;
-  room.history.push({ round: room.round, overtime: room.overtime, kind: room.roundKind, defender: room.defender, winner, reason });
+  const record: RoundRecord = { round: room.round, overtime: room.overtime, kind: room.roundKind, defender: room.defender, winner, reason, tick: room.tick };
+  room.history.push(record);
+  room.audit.push({ ...record, at: now, alive: { azure: aliveCount(room, 'azure'), ember: aliveCount(room, 'ember') }, health: { azure: aliveHealth(room, 'azure'), ember: aliveHealth(room, 'ember') } });
   room.projectiles = [];
+  const sudden = room.roundKind === 'tiebreaker';
   if (winner) {
     room.roundWins[winner] += 1;
-    emit(room, 'round-end', `${TEAM_NAMES[winner]} WINS ROUND ${room.round} — ${reason}`, { team: winner, round: room.round });
+    emit(room, 'round-end', sudden ? `${TEAM_NAMES[winner]} WINS SUDDEN DEATH — ${reason}` : `${TEAM_NAMES[winner]} WINS ROUND ${room.round} — ${reason}`, { team: winner, round: room.round });
   } else {
-    emit(room, 'round-end', `ROUND ${room.round} DRAWN — ${reason} · REPLAYING`, { round: room.round });
+    emit(room, 'round-end', sudden ? `SUDDEN DEATH DRAWN — ${reason} · OVERTIME ${room.overtime + 1}` : `ROUND ${room.round} DRAWN — ${reason} · REPLAYING`, { round: room.round });
   }
   const leader = room.roundWins.azure > room.roundWins.ember ? 'azure' : room.roundWins.ember > room.roundWins.azure ? 'ember' : null;
   if ((winner && room.roundWins[winner] >= WINS_NEEDED) || (winner && room.round >= MAX_ROUNDS)) {
@@ -323,7 +345,7 @@ function endRound(room: MatchRoom, winner: Team | null, reason: string, now: num
     emit(room, 'sides', `SIDES SWITCH — ${TEAM_NAMES.ember} NOW DEFENDS THE TOWERS`);
   } else if (room.nextRound !== room.round && room.nextRound === MAX_ROUNDS) {
     pause = SWITCH_INTERMISSION_MS;
-    emit(room, 'sides', `${room.roundWins.azure}–${room.roundWins.ember} — ROUND 11 TIEBREAKER · 5V5 DOGFIGHT`);
+    emit(room, 'sides', `${room.roundWins.azure}–${room.roundWins.ember} — ROUND 11 · SUDDEN DEATH`);
   }
   room.intermissionAt = now + pause;
 }
@@ -332,7 +354,7 @@ export function resetToLobby(room: MatchRoom) {
   Object.assign(room, {
     phase: 'lobby', round: 0, overtime: 0, nextRound: 1, nextOvertime: 0, roundKind: 'towers', defender: null,
     towers: [], stations: [], projectiles: [], roundWins: { azure: 0, ember: 0 }, roundWinner: null, matchWinner: null, history: [],
-    lobbyStartsAt: 0, prepEndsAt: 0, countdownAt: 0, intermissionAt: 0, roundEndsAt: 0, resultsUntil: 0,
+    lobbyStartsAt: 0, prepEndsAt: 0, countdownAt: 0, intermissionAt: 0, roundEndsAt: 0, resultsUntil: 0, combatStartedAt: 0, zoneWarned: false,
   });
   const slots: Record<Team, number> = { azure: 0, ember: 0 };
   for (const player of room.players.values()) {
@@ -839,17 +861,93 @@ function updateSensors(room: MatchRoom) {
   }
 }
 
+/* ----------------------------------------------------- sudden death zone -- */
+
+/**
+ * The Round 11 safe zone at a moment in time: full size through preparation
+ * and the first SUDDEN_DEATH.holdSeconds of combat, then closing linearly.
+ * Derived from the clock alone, so server and snapshot always agree.
+ */
+export function zoneAt(room: MatchRoom, now: number): ZoneState | null {
+  if (room.practice || room.roundKind !== 'tiebreaker') return null;
+  if (room.phase !== 'prep' && room.phase !== 'countdown' && room.phase !== 'active') return null;
+  const elapsed = room.phase === 'active' ? (now - room.combatStartedAt) / 1_000 : 0;
+  const progress = clamp((elapsed - SUDDEN_DEATH.holdSeconds) / SUDDEN_DEATH.shrinkSeconds, 0, 1);
+  return {
+    x: 0, z: 0,
+    radius: SUDDEN_DEATH.startRadius + (SUDDEN_DEATH.endRadius - SUDDEN_DEATH.startRadius) * progress,
+    endRadius: SUDDEN_DEATH.endRadius,
+    shrinking: progress > 0 && progress < 1,
+    closesIn: Math.max(0, SUDDEN_DEATH.holdSeconds - elapsed),
+    damage: SUDDEN_DEATH.minDamage + (SUDDEN_DEATH.maxDamage - SUDDEN_DEATH.minDamage) * progress,
+  };
+}
+
+/** Jets outside the safe zone burn. Run after combat and before the round check, so zone kills count on this tick. */
+function stepZone(room: MatchRoom, now: number, dt: number) {
+  const zone = zoneAt(room, now);
+  if (!zone || room.phase !== 'active') return;
+  if (!room.zoneWarned && zone.closesIn <= 0) {
+    room.zoneWarned = true;
+    emit(room, 'zone', 'SAFE ZONE CLOSING — STAY INSIDE THE RING');
+  }
+  for (const jet of room.players.values()) {
+    if (!jet.alive || jet.role !== 'pilot') continue;
+    if (Math.hypot(jet.x - zone.x, jet.z - zone.z) <= zone.radius) continue;
+    jet.hp = Math.max(0, jet.hp - zone.damage * dt);
+    if (jet.hp > 0) {
+      if (jet.zoneAlertAt < now) {
+        jet.zoneAlertAt = now + 2_000;
+        emit(room, 'zone', `${jet.name} — OUTSIDE THE SAFE ZONE`, { team: jet.team, ownerId: jet.id });
+      }
+      continue;
+    }
+    jet.alive = false;
+    jet.deaths += 1;
+    jet.targetId = null;
+    emit(room, 'jet-down', `${jet.name} WAS CONSUMED BY THE ZONE`, { team: otherTeam(jet.team), targetId: jet.id, x: jet.x, y: jet.y, z: jet.z });
+  }
+}
+
+function aliveCount(room: MatchRoom, team: Team) {
+  let count = 0;
+  for (const player of room.players.values()) if (player.team === team && player.alive) count += 1;
+  return count;
+}
+function aliveHealth(room: MatchRoom, team: Team) {
+  let total = 0;
+  for (const player of room.players.values()) if (player.team === team && player.alive) total += player.hp;
+  return total;
+}
+
+/**
+ * Called once per simulation tick, after every hit, crash and zone burn for
+ * that tick, so "both sides went down at once" means on the same tick.
+ */
 function checkRoundEnd(room: MatchRoom, now: number) {
   if (room.practice || room.phase !== 'active') return;
-  const alive = (team: Team) => { let count = 0; for (const player of room.players.values()) if (player.team === team && player.alive) count += 1; return count; };
+  const alive = (team: Team) => aliveCount(room, team);
   const timeUp = now >= room.roundEndsAt;
   if (room.roundKind === 'tiebreaker') {
     const blue = alive('azure');
     const red = alive('ember');
-    if (!blue && !red) endRound(room, null, 'BOTH SQUADRONS ELIMINATED', now);
+    if (!blue && !red) endRound(room, null, 'BOTH SQUADRONS ELIMINATED ON THE SAME TICK', now);
     else if (!red) endRound(room, 'azure', 'RED SQUADRON ELIMINATED', now);
     else if (!blue) endRound(room, 'ember', 'BLUE SQUADRON ELIMINATED', now);
-    else if (timeUp) endRound(room, null, 'TIME — BOTH SQUADRONS STILL FLYING', now);
+    else if (timeUp) {
+      // Time: more surviving jets wins; then more combined health; dead even is a draw, replayed.
+      if (blue !== red) {
+        const winner: Team = blue > red ? 'azure' : 'ember';
+        endRound(room, winner, `TIME — ${Math.max(blue, red)} JETS SURVIVING TO ${Math.min(blue, red)}`, now);
+        return;
+      }
+      const blueHp = Math.ceil(aliveHealth(room, 'azure'));
+      const redHp = Math.ceil(aliveHealth(room, 'ember'));
+      if (blueHp !== redHp) {
+        const winner: Team = blueHp > redHp ? 'azure' : 'ember';
+        endRound(room, winner, `TIME — ${blue}V${red} · MORE HEALTH REMAINING ${Math.max(blueHp, redHp)} TO ${Math.min(blueHp, redHp)}`, now);
+      } else endRound(room, null, `TIME — ${blue}V${red} WITH EQUAL HEALTH`, now);
+    }
     return;
   }
   const defender = room.defender!;
@@ -879,6 +977,7 @@ export function stepCombat(room: MatchRoom, now: number, dt: number) {
 }
 
 export function stepMatch(room: MatchRoom, now: number, dt: number) {
+  room.tick += 1;
   if (room.practice) { stepCombat(room, now, dt); return; }
   const bothTeams = teamCount(room, 'azure') > 0 && teamCount(room, 'ember') > 0;
   switch (room.phase) {
@@ -901,6 +1000,7 @@ export function stepMatch(room: MatchRoom, now: number, dt: number) {
       break;
     case 'active':
       stepCombat(room, now, dt);
+      stepZone(room, now, dt);
       checkRoundEnd(room, now);
       break;
     case 'intermission':
@@ -917,6 +1017,11 @@ export function stepMatch(room: MatchRoom, now: number, dt: number) {
 /** Called when a player leaves mid-round: the round may now be decided. */
 export function afterDeparture(room: MatchRoom, now: number) {
   checkRoundEnd(room, now);
+}
+
+/** Round results decided since the last call, for the server to log. */
+export function drainAudit(room: MatchRoom) {
+  return room.audit.splice(0);
 }
 
 export function isFull(room: MatchRoom) {
@@ -942,6 +1047,7 @@ export function snapshotRoom(room: MatchRoom, now: number): RoomState {
     towers: room.towers.map(({ id, kind, label, team, x, z, hp, maxHp, crewed, shielded, barrier }) => ({ id, kind, label, team, x, z, hp, maxHp, crewed, shielded, barrier })),
     stations: room.stations.map((station) => ({ ...station })),
     projectiles: room.projectiles.map(({ id, ownerId, team, kind, x, y, z, yaw, pitch, speed, targetId }) => ({ id, ownerId, team, kind, x, y, z, yaw, pitch, speed, targetId })),
+    zone: zoneAt(room, now),
     history: room.history.map((record) => ({ ...record })),
     events: room.events.splice(0),
   };

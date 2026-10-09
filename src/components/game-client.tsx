@@ -5,7 +5,7 @@ import { ArenaView } from '@/components/arena-view';
 import { AttitudeIndicator } from '@/components/attitude-indicator';
 import { RadarScope } from '@/components/radar-scope';
 import {
-  ARENA_CATALOG, DEFAULT_ARENA_ID, GROUND, GROUND_LOADOUTS, JET_CATALOG, TOWER, JET_FLIGHT, MAX_PLAYERS, MAX_ROUNDS, METERS_PER_UNIT, REGULATION_ROUNDS, ROUNDS_PER_HALF, TEAM_NAMES, TEAM_SHORT, WINS_NEEDED,
+  ARENA_CATALOG, DEFAULT_ARENA_ID, GROUND, GROUND_LOADOUTS, JET_CATALOG, TOWER, JET_FLIGHT, MAX_PLAYERS, MAX_ROUNDS, METERS_PER_UNIT, REGULATION_ROUNDS, ROUNDS_PER_HALF, TEAM_NAMES, TEAM_SHORT, TIEBREAKER_SECONDS, WINS_NEEDED,
   type ArenaId, type CombatEvent, type GroundLoadout, type JetModel, type JetState, type PlayerInput, type Role, type RolePreference, type RoomState, type RoundRecord, type ServerMessage, type Team,
 } from '@/lib/protocol';
 import { createTrainingSession, equipTraining, stepTraining, TRAINING_PLAYER_ID, type TrainingSession } from '@/lib/training';
@@ -305,15 +305,18 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       if (seenEventsRef.current.has(event.id)) continue;
       seenEventsRef.current.add(event.id);
       fresh.push(event);
-      if (['round-start', 'round-end', 'match-end', 'tower-down', 'tower-critical', 'sides'].includes(event.type)) announce(event.text);
       const mine = event.ownerId === selfIdRef.current;
+      if (['round-start', 'round-end', 'match-end', 'tower-down', 'tower-critical', 'sides'].includes(event.type) || (event.type === 'zone' && !event.ownerId)) announce(event.text);
       if (event.type === 'tower-down') { sfx.explosion(true); sfx.alarm(); }
       else if (event.type === 'tower-critical') sfx.alarm();
+      // Your tower under attack (the event's team is the attacker's).
+      else if (event.type === 'tower-hit' && event.team && selfPlayer()?.team !== event.team) sfx.alarm();
       else if (event.type === 'jet-down') sfx.explosion(false);
       else if (event.type === 'repair') sfx.repairDone();
       else if (event.type === 'repair-interrupted' && mine) sfx.repairInterrupted();
       else if (event.type === 'barrier') sfx.shield();
       else if (event.type === 'round-start') sfx.horn();
+      else if (event.type === 'zone' && (!event.ownerId || mine)) sfx.alarm();
     }
     if (fresh.some((event) => event.ownerId === selfIdRef.current && event.type === 'jet-hit')) sfx.hit();
     if (fresh.some((event) => event.ownerId === selfIdRef.current && (event.type === 'jet-hit' || event.type === 'jet-down' || event.type === 'tower-hit' || event.type === 'tower-down'))) {
@@ -321,9 +324,9 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       if (hitTimerRef.current) window.clearTimeout(hitTimerRef.current);
       hitTimerRef.current = window.setTimeout(() => setHitMarker(false), 220);
     }
-    const feedEvents = fresh.filter((event) => event.type !== 'jet-hit' && !((event.type === 'boundary' || event.type === 'repair-interrupted') && event.ownerId !== selfIdRef.current));
+    const feedEvents = fresh.filter((event) => event.type !== 'jet-hit' && !((event.type === 'boundary' || event.type === 'repair-interrupted' || event.type === 'zone') && event.ownerId && event.ownerId !== selfIdRef.current));
     if (feedEvents.length) setFeed((previous) => [...feedEvents, ...previous].slice(0, 6));
-  }, [announce]);
+  }, [announce, selfPlayer]);
 
   function resetInputs() {
     trainingInputRef.current = { ...NEUTRAL };
@@ -633,8 +636,12 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const phase = snapshot?.phase;
   const defender = snapshot?.defender ?? null;
   const tiebreaker = snapshot?.roundKind === 'tiebreaker';
+  const zone = snapshot?.zone ?? null;
+  const outsideZone = Boolean(zone && self?.alive && self.role === 'pilot' && phase === 'active' && Math.hypot(self.x - zone.x, self.z - zone.z) > zone.radius);
+  const survivors = (team: Team) => players.filter((player) => player.team === team && player.alive).length;
+  const squadHealth = (team: Team) => Math.ceil(players.reduce((total, player) => total + (player.team === team && player.alive ? player.hp : 0), 0));
   const mySide = !self || !snapshot ? '' : offlineTraining ? (snapshot.defender === self.team ? 'DEFENCE DRILL' : 'ATTACK DRILL')
-    : tiebreaker ? 'TIEBREAKER' : phase !== 'active' && phase !== 'prep' && phase !== 'countdown' ? '' : defender === self.team ? 'DEFENDING' : 'ATTACKING';
+    : tiebreaker ? 'SUDDEN DEATH' : phase !== 'active' && phase !== 'prep' && phase !== 'countdown' ? '' : defender === self.team ? 'DEFENDING' : 'ATTACKING';
   const rosterCount = players.length;
   const teamPlayers = (team: Team) => players.filter((player) => player.team === team).sort((a, b) => Number(b.alive) - Number(a.alive) || (a.role === b.role ? 0 : a.role === 'pilot' ? -1 : 1) || b.kills - a.kills);
   const towers = snapshot?.towers ?? [];
@@ -647,7 +654,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const spectating = self && !self.alive ? players.find((player) => player.id === spectateIdRef.current) : undefined;
   const preparing = phase === 'prep' || phase === 'countdown';
   const activeDrones = players.filter((player) => player.team === 'ember' && player.alive).length;
-  const phaseText = offlineTraining ? 'OFFLINE TRAINING' : phase === 'prep' ? `PREPARATION · ${snapshot?.phaseSecondsLeft}S` : phase === 'countdown' ? `WEAPONS FREE IN ${snapshot?.phaseSecondsLeft}` : phase === 'intermission' ? `NEXT ROUND IN ${snapshot?.phaseSecondsLeft}` : phase === 'lobby' ? (snapshot?.phaseSecondsLeft ? `MATCH STARTS IN ${snapshot.phaseSecondsLeft}` : 'WAITING FOR BOTH TEAMS') : phase === 'complete' ? 'MATCH COMPLETE' : tiebreaker ? 'TIEBREAKER' : 'LIVE';
+  const phaseText = offlineTraining ? 'OFFLINE TRAINING' : phase === 'prep' ? `PREPARATION · ${snapshot?.phaseSecondsLeft}S` : phase === 'countdown' ? `WEAPONS FREE IN ${snapshot?.phaseSecondsLeft}` : phase === 'intermission' ? `NEXT ROUND IN ${snapshot?.phaseSecondsLeft}` : phase === 'lobby' ? (snapshot?.phaseSecondsLeft ? `MATCH STARTS IN ${snapshot.phaseSecondsLeft}` : 'WAITING FOR BOTH TEAMS') : phase === 'complete' ? 'MATCH COMPLETE' : tiebreaker ? 'SUDDEN DEATH' : 'LIVE';
   const phaseClock = offlineTraining ? 'NO TIMER' : phase === 'active' || preparing ? clock(snapshot?.secondsLeft ?? 0) : phase === 'intermission' ? `00:${String(snapshot?.phaseSecondsLeft ?? 0).padStart(2, '0')}` : '--:--';
   const myStation = isGunner ? stations[self!.station] : undefined;
   const myTower = myStation ? towers.find((tower) => tower.id === myStation.towerId) : undefined;
@@ -658,7 +665,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const nextDefender = defenderOf(nextRound);
   const objective = offlineTraining
     ? (isGunner ? <>DEFENCE DRILL<br /><span>SHOOT THE DRONES · HOLD R AT A REPAIR PAD · F SHIELD</span></> : <>ATTACK DRILL<br /><span>TAKE OUT THE SHIELD TOWER FIRST</span></>)
-    : tiebreaker ? <>TIEBREAKER · 5V5<br /><span>LAST SQUADRON FLYING WINS</span></>
+    : tiebreaker ? <>SUDDEN DEATH · ALL JETS<br /><span>LAST SQUADRON FLYING WINS · STAY INSIDE THE ZONE</span></>
       : !self || !defender ? <>{WINS_NEEDED} ROUND WINS TAKE THE MATCH<br /><span>ROLES SWAP AFTER ROUND {ROUNDS_PER_HALF}</span></>
         : defender === self.team ? <>DEFEND THE TOWERS<br /><span>HOLD ONE UNTIL TIME OR DOWN EVERY ATTACKER</span></>
           : <>DESTROY ALL 3 TOWERS<br /><span>SHIELD FIRST · OR ELIMINATE ALL FIVE DEFENDERS</span></>;
@@ -755,6 +762,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
           <div className="phase-stamp"><span className={phase === 'active' || offlineTraining ? 'phase-live' : ''}>{phaseText}</span><b>{phaseClock}</b></div>
           {self && mySide && <div className={`role-chip ${TEAM_CLASS[self.team]}`}><b>{TEAM_SHORT[self.team]}</b> {mySide} <i>·</i> {ROLE_ICON[self.role]} {ROLE_LABEL[self.role]}{isGunner && myStation ? <> <i>·</i> {myStation.kind === 'repair' ? 'REPAIR PAD' : 'STATION'} {myStation.index + 1} · {myTower?.label}</> : null}</div>}
           {self?.alive && <div className={`self-health ${healthClass(self.hp / 100)}`}><span>{isGunner ? 'UNIT' : 'HULL'}</span><i><em style={{ width: `${self.hp}%` }} /></i><b>{Math.ceil(self.hp)}</b></div>}
+          {outsideZone && zone && <div className="zone-warning">⚠ OUTSIDE THE SAFE ZONE — TURN BACK <b>−{Math.round(zone.damage)} HP/S</b></div>}
           {incomingMissile ? <div className="threat-warning missile">⚠ MISSILE INBOUND — BREAK!</div> : lockedBy.length ? <div className="threat-warning lock">◎ LOCKED BY {lockedBy.map((player) => player.name).join(', ')}</div> : null}
 
           {(['azure', 'ember'] as const).map((team, index) => <aside key={team} className={`team-panel team-panel-${index ? 'right' : 'left'}`}>
@@ -778,6 +786,11 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
                 <small>{tower.hp > 0 ? (health < TOWER.critical ? `CRITICAL${tags ? ' · ' + tags : ''}` : tags || '—') : tower.kind === 'shield' ? 'SHIELD LOST' : tower.kind === 'radar' ? 'RADAR OFFLINE' : 'GUNS OFFLINE'}</small>
               </div>;
             })}
+            {tiebreaker && !offlineTraining && <div className={`zone-status ${zone?.shrinking ? 'closing' : ''}`}>
+              <div className="zone-survivors"><b className="azure-text">{survivors('azure')}</b><span>JETS LEFT</span><b className="ember-text">{survivors('ember')}</b></div>
+              <div className="zone-survivors zone-health"><i className="azure-text">{squadHealth('azure')} HP</i><span>SQUAD HEALTH</span><i className="ember-text">{squadHealth('ember')} HP</i></div>
+              <small>{!zone ? 'SAFE ZONE' : phase !== 'active' ? 'ZONE HOLDS 60S, THEN CLOSES' : zone.closesIn > 0 ? `ZONE CLOSES IN ${Math.ceil(zone.closesIn)}S` : zone.shrinking ? `ZONE CLOSING · ${Math.round(zone.damage)} HP/S OUTSIDE` : `ZONE FULLY CLOSED · ${Math.round(zone.damage)} HP/S OUTSIDE`}</small>
+            </div>}
             <div className="objective-note">{objective}</div>
           </div>
 
@@ -820,25 +833,30 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
           </div>}
 
           {self && !self.alive && phase === 'active' && <div className="spectator-note">{offlineTraining ? 'DOWN — BACK IN A MOMENT' : <>ELIMINATED — NO RESPAWNS UNTIL ROUND {snapshot?.round} ENDS<br />{spectating ? <>SPECTATING <b>{spectating.name}</b> · {ROLE_LABEL[spectating.role]} · Q / E OR CLICK TO SWITCH</> : 'NO TEAMMATES LEFT'}</>}</div>}
-          {phase === 'prep' && self && !offlineTraining && <div className="prep-panel">
+          {phase === 'prep' && tiebreaker && !offlineTraining && <div className="sudden-death-card" aria-live="assertive">
+            <span>ROUND 11{snapshot?.overtime ? ` · OVERTIME ${snapshot.overtime}` : ''} · {snapshot?.roundWins.azure}–{snapshot?.roundWins.ember}</span>
+            <strong>SUDDEN DEATH</strong>
+            <p>All ten pilots in the air. No towers. Last squadron flying wins. {Math.round(TIEBREAKER_SECONDS / 60)} minutes — the safe zone starts closing after 60 seconds.</p>
+          </div>}
+          {phase === 'prep' && self && !offlineTraining && <div className={`prep-panel ${tiebreaker ? 'prep-sudden' : ''}`}>
             <span className="prep-kicker">ROUND {snapshot?.round}{snapshot?.overtime ? ` · OT${snapshot.overtime}` : ''} · PREPARATION · {snapshot?.phaseSecondsLeft}S</span>
-            <strong>{tiebreaker ? 'TIEBREAKER — 5V5 DOGFIGHT' : defender === self.team ? 'YOU DEFEND' : 'YOU ATTACK'} <em>· {ROLE_ICON[self.role]} {ROLE_LABEL[self.role]}</em></strong>
+            <strong>{tiebreaker ? 'SUDDEN DEATH — ALL JETS' : defender === self.team ? 'YOU DEFEND' : 'YOU ATTACK'} <em>· {ROLE_ICON[self.role]} {ROLE_LABEL[self.role]}</em></strong>
             {isGunner ? <>
               <p>Pick your loadout, then a gun station (1–6). Moves are instant until the countdown.</p>
               <div className="equip-row">{LOADOUTS.map(([id, option]) => <button key={id} type="button" className={self.loadout === id ? 'selected' : ''} onClick={() => chooseEquipment({ loadout: id })}><b>{option.name}</b><small>{option.description}</small></button>)}</div>
             </> : <>
-              <p>{defender === self.team ? 'Intercept the attackers and cover your ground crews.' : tiebreaker ? 'Last squadron flying wins.' : 'Take out the Shield Tower first: it halves damage to the other two.'}</p>
+              <p>{defender === self.team ? 'Intercept the attackers and cover your ground crews.' : tiebreaker ? 'Last squadron flying wins. At time: most jets left, then most health.' : 'Take out the Shield Tower first: it halves damage to the other two.'}</p>
               <div className="equip-row">{JET_CATALOG.map((model) => <button key={model.id} type="button" className={self.model === model.id ? 'selected' : ''} onClick={() => chooseEquipment({ model: model.id })}><b>{model.name}</b><small>{model.role} · {model.description}</small></button>)}</div>
             </>}
             {!tiebreaker && <div className="tower-brief">{towers.map((tower) => <div key={tower.id}><b>{tower.label}</b><small>{TOWER_ROLE[tower.kind]}</small></div>)}</div>}
           </div>}
-          {phase === 'countdown' && !offlineTraining && <div className="combat-countdown"><span>WEAPONS FREE IN</span><b>{snapshot?.phaseSecondsLeft}</b></div>}
+          {phase === 'countdown' && !offlineTraining && <div className={`combat-countdown ${tiebreaker ? 'sudden-death' : ''}`}><span>{tiebreaker ? 'SUDDEN DEATH · WEAPONS FREE IN' : 'WEAPONS FREE IN'}</span><b>{snapshot?.phaseSecondsLeft}</b></div>}
           {offlineTraining && isGunner && self && <div className="training-loadout">{LOADOUTS.map(([id, option]) => <button key={id} type="button" className={self.loadout === id ? 'selected' : ''} onClick={() => chooseEquipment({ loadout: id })}>{option.name}</button>)}</div>}
           {phase === 'intermission' && lastRound && <div className="round-card">
-            <span>{roundLabel(lastRound)} · {lastRound.kind === 'tiebreaker' ? 'TIEBREAKER' : `${TEAM_SHORT[lastRound.defender!]} DEFENDED`}</span>
-            <strong className={lastRound.winner ? `${lastRound.winner}-text` : ''}>{lastRound.winner ? `${TEAM_NAMES[lastRound.winner]} WINS` : 'DRAW — REPLAY'}</strong>
+            <span>{roundLabel(lastRound)} · {lastRound.kind === 'tiebreaker' ? 'SUDDEN DEATH' : `${TEAM_SHORT[lastRound.defender!]} DEFENDED`}</span>
+            <strong className={lastRound.winner ? `${lastRound.winner}-text` : ''}>{lastRound.winner ? `${TEAM_NAMES[lastRound.winner]} WINS` : lastRound.kind === 'tiebreaker' ? 'DRAW — SUDDEN DEATH OVERTIME' : 'DRAW — REPLAY'}</strong>
             <p>{lastRound.reason}</p>
-            <div className="round-card-next">NEXT · ROUND {nextRound}{nextOvertime ? ` · OVERTIME ${nextOvertime}` : ''} · {nextDefender ? `${TEAM_NAMES[nextDefender]} DEFENDS${self ? ` · YOU ${nextDefender === self.team ? 'DEFEND' : 'ATTACK'}` : ''}` : 'TIEBREAKER — 5V5 DOGFIGHT'}</div>
+            <div className="round-card-next">NEXT · ROUND {nextRound}{nextOvertime ? ` · OVERTIME ${nextOvertime}` : ''} · {nextDefender ? `${TEAM_NAMES[nextDefender]} DEFENDS${self ? ` · YOU ${nextDefender === self.team ? 'DEFEND' : 'ATTACK'}` : ''}` : 'SUDDEN DEATH — ALL JETS, NO TOWERS'}</div>
             {nextRound === ROUNDS_PER_HALF + 1 && !nextOvertime && <div className="round-card-switch">⇄ SIDES SWITCH</div>}
           </div>}
           {phase === 'complete' && snapshot && <ResultsScreen state={snapshot} selfId={selfIdRef.current} onLeave={leaveArena} />}
@@ -860,7 +878,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
         </section>
       )}
 
-      {!connected && <section className="hangar-manual" id="flight-manual"><div className="manual-title"><span>HOW IT WORKS / 01</span><h2>Attack. Defend.<br />Switch sides.</h2><p>Up to eleven five-minute rounds. Blue defends rounds 1–5, Red defends 6–10. Each round won is a point; the first team to six wins the match. At 5–5, round 11 is a straight 5v5 dogfight. Drawn rounds are replayed. Nobody respawns mid-round.</p></div><article><i>01</i><span>ATTACKERS · 5 JETS</span><h3>Bring down the towers.</h3><p>Destroy all three towers, or eliminate all five defenders, before the clock runs out. Guns, cannons and lock-on missiles work on jets, gun crews and towers alike. Use the tunnels, bridges and gates to flank.</p></article><article><i>02</i><span>DEFENDERS · 3 GROUND + 2 JETS</span><h3>Hold one tower.</h3><p>Ground crews man anti-aircraft cannons and radar-guided SAMs, drive between six stations, and patch towers with limited repairs. A crewed tower’s point defence fires on attackers that get close. Two jets intercept. Keep one tower standing until time, or wipe out the attackers.</p></article><article><i>03</i><span>THE MATCH</span><h3>First to six.</h3><p>Choose PILOT, GROUND or ANY before you join: when your team defends, the two jets go to those who asked to fly. The results screen shows every round and every player’s kills, damage and repairs.</p></article></section>}
+      {!connected && <section className="hangar-manual" id="flight-manual"><div className="manual-title"><span>HOW IT WORKS / 01</span><h2>Attack. Defend.<br />Switch sides.</h2><p>Up to eleven five-minute rounds. Blue defends rounds 1–5, Red defends 6–10. Each round won is a point; the first team to six wins the match. At 5–5, round 11 is Sudden Death: all ten pilots in jets, no towers, three minutes and a closing safe zone. Drawn rounds are replayed. Nobody respawns mid-round.</p></div><article><i>01</i><span>ATTACKERS · 5 JETS</span><h3>Bring down the towers.</h3><p>Destroy all three towers, or eliminate all five defenders, before the clock runs out. Guns, cannons and lock-on missiles work on jets, gun crews and towers alike. Use the tunnels, bridges and gates to flank.</p></article><article><i>02</i><span>DEFENDERS · 3 GROUND + 2 JETS</span><h3>Hold one tower.</h3><p>Ground crews man anti-aircraft cannons and radar-guided SAMs, drive between six stations, and patch towers with limited repairs. A crewed tower’s point defence fires on attackers that get close. Two jets intercept. Keep one tower standing until time, or wipe out the attackers.</p></article><article><i>03</i><span>THE MATCH</span><h3>First to six.</h3><p>Choose PILOT, GROUND or ANY before you join: when your team defends, the two jets go to those who asked to fly. The results screen shows every round and every player’s kills, damage and repairs.</p></article></section>}
       {!connected && <footer className="hangar-footer"><span>SKYFORGE//STADIUM <i>·</i> AEROSPACE COMBAT LEAGUE</span><span>FIVE ATTACK. FIVE DEFEND.</span></footer>}
     </main>
   );
@@ -870,12 +888,15 @@ function ResultsScreen({ state, selfId, onLeave }: { state: RoomState; selfId: s
   const winner = state.matchWinner;
   const scored = state.players.map((player) => ({ player, score: playerScore(player) }));
   const mvp = scored.reduce<{ player: JetState; score: number } | null>((best, entry) => (!best || entry.score > best.score ? entry : best), null);
-  return <div className="results-screen" role="dialog" aria-label="Match results">
-    <span className="results-kicker">MATCH COMPLETE · FIRST TO {WINS_NEEDED}</span>
+  const decider = state.history.at(-1);
+  const suddenDeath = Boolean(winner && decider?.kind === 'tiebreaker' && decider.winner === winner);
+  return <div className={`results-screen ${suddenDeath ? 'sudden-death-victory' : ''}`} role="dialog" aria-label="Match results">
+    <span className="results-kicker">{suddenDeath ? `SUDDEN DEATH VICTORY${decider!.overtime ? ` · AFTER ${decider!.overtime} OVERTIME${decider!.overtime > 1 ? 'S' : ''}` : ''}` : `MATCH COMPLETE · FIRST TO ${WINS_NEEDED}`}</span>
     <strong className={winner ? `${winner}-text` : ''}>{winner ? `${TEAM_NAMES[winner]} WINS` : 'MATCH DRAWN'}</strong>
+    {suddenDeath && <p className="results-decider">{decider!.reason}</p>}
     <div className="final-score"><b className="azure-text">{state.roundWins.azure}</b><i>—</i><b className="ember-text">{state.roundWins.ember}</b></div>
     <div className="round-strip">{state.history.map((record, index) => <div key={index} className={`round-cell ${record.winner ?? 'draw'}`} title={record.reason}>
-      <i>{roundLabel(record)}</i><b>{record.winner ? TEAM_SHORT[record.winner] : 'DRAW'}</b><small>{record.kind === 'tiebreaker' ? 'TIEBREAK' : `${TEAM_SHORT[record.defender!]} DEF`}</small>
+      <i>{roundLabel(record)}</i><b>{record.winner ? TEAM_SHORT[record.winner] : 'DRAW'}</b><small>{record.kind === 'tiebreaker' ? 'SUDDEN' : `${TEAM_SHORT[record.defender!]} DEF`}</small>
     </div>)}</div>
     <div className="results-tables">{(['azure', 'ember'] as const).map((team) => <table key={team} className={`results-table ${team}`}>
       <caption className={`${team}-text`}>{TEAM_NAMES[team]} · {state.roundWins[team]} ROUNDS</caption>

@@ -413,7 +413,7 @@ function createScoreboard(): ScreenHandle {
     const status = state?.room === 'TRAINING'
       ? 'TRAINING RANGE   •   PRACTICE DRILL'
       : state
-        ? `ROUND ${String(state.round).padStart(2, '0')} / 11${state.overtime ? ` OT${state.overtime}` : ''}   •   ${state.phase === 'active' ? (state.roundKind === 'tiebreaker' ? 'TIEBREAKER' : `${state.defender === 'azure' ? 'BLUE' : 'RED'} DEFENDS`) : state.phase.toUpperCase()}`
+        ? `ROUND ${String(state.round).padStart(2, '0')} / 11${state.overtime ? ` OT${state.overtime}` : ''}   •   ${state.phase === 'active' ? (state.roundKind === 'tiebreaker' ? 'SUDDEN DEATH' : `${state.defender === 'azure' ? 'BLUE' : 'RED'} DEFENDS`) : state.phase.toUpperCase()}`
         : 'AUTONOMOUS COMBAT STADIUM';
     context.fillText(status, 700, 226);
     // The three towers: lit while standing, struck through once destroyed.
@@ -1661,6 +1661,24 @@ function buildLoungesAndDecks(rig: Rig) {
     front.position.set(0, concourseTop + 13, z - side * 3); root.add(front);
     addBox(root, side < 0 ? '#4cc9f0' : '#ef334b', [118, 1.4, 1.2], [0, concourseTop + 26, z - side * 3.6], basic(side < 0 ? '#4cc9f0' : '#ef334b'));
   }
+  // Broadcast booths above the VIP boxes: glazed commentary rooms with an
+  // ON-AIR lamp and a camera on a boom reaching out over the bowl.
+  const boomMaterial = detailedStandard('#4a6676', .42, .6, surfaces, 'steel');
+  const onAir = basic('#ff3b3b');
+  for (const side of [-1, 1]) {
+    const z = side * 528;
+    const y = concourseTop + 44;
+    addBox(root, '#152938', [72, 18, 14], [0, y, z + side * 4], loungeGlow);
+    const front = new THREE.Mesh(new THREE.BoxGeometry(68, 13, 1.2), glass);
+    front.position.set(0, y + 1, z - side * 3.4); root.add(front);
+    addBox(root, '#2b4557', [76, 2, 18], [0, y - 10, z + side * 4], deckSteel);
+    addBox(root, '#ff3b3b', [10, 3, 1], [-28, y + 11, z - side * 3.6], onAir);
+    for (const x of [-46, 46]) {
+      addBeam(root, new THREE.Vector3(x, y - 2, z + side * 2), new THREE.Vector3(x + Math.sign(x) * 4, y - 4, z - side * 34), 1.4, boomMaterial);
+      addBox(root, '#20313c', [6, 5, 9], [x + Math.sign(x) * 4, y - 6, z - side * 36], boomMaterial);
+      addBox(root, '#9fe8ff', [3, 3, .6], [x + Math.sign(x) * 4, y - 6, z - side * 40.6], basic('#9fe8ff'));
+    }
+  }
   for (const side of [-1, 1]) {
     const x = side * 657;
     addBox(root, '#19303f', [10, 24, 156], [x + side * 3, concourseTop + 12, 0], loungeGlow);
@@ -1860,6 +1878,28 @@ ${shader.vertexShader}`
     holo.rotation.x = Math.PI / 2.4;
     root.add(holo);
     rig.holograms.push(holo);
+  }
+
+  // Holographic advertisements: translucent panels hovering over the stands,
+  // turned to face the pitch, showing the same rolling sponsor feed as the
+  // LED ribbons (shared textures, so no extra repaints).
+  const frameGlow = new THREE.MeshBasicMaterial({ color: '#8ff2ff', transparent: true, opacity: .55, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false });
+  for (let index = 0; index < 4; index += 1) {
+    const angle = (index / 4) * Math.PI * 2 + Math.PI / 4;
+    const panel = new THREE.Group();
+    panel.position.set(Math.cos(angle) * 700, 300, Math.sin(angle) * 560);
+    panel.lookAt(0, 300, 0);
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(132, 22), new THREE.MeshBasicMaterial({
+      map: advertPair[index % 2].material.map, transparent: true, opacity: .72, side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false,
+    }));
+    panel.add(screen);
+    for (const y of [-12.5, 12.5]) { const edge = new THREE.Mesh(new THREE.BoxGeometry(136, .7, .7), frameGlow); edge.position.y = y; panel.add(edge); }
+    // Emitter pylon underneath, projecting the image.
+    const emitter = new THREE.Mesh(new THREE.ConeGeometry(9, 26, 10, 1, true), frameGlow);
+    emitter.position.y = -26; emitter.rotation.x = Math.PI; panel.add(emitter);
+    root.add(panel);
+    rig.oscillators.push({ object: panel, axis: 'y', home: 300, amplitude: 5, speed: .4, phase: index * 1.3 });
   }
 }
 

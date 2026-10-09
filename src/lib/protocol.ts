@@ -18,7 +18,8 @@ export const PREP_SECONDS = 15;
 export const COMBAT_COUNTDOWN_SECONDS = 5;
 /** Once both teams have a player, the lobby waits this long for others before round 1's preparation. */
 export const LOBBY_SECONDS = 10;
-export const TIEBREAKER_SECONDS = 5 * 60;
+/** Round 11, Sudden Death: a shorter all-jet round with a shrinking safe zone. */
+export const TIEBREAKER_SECONDS = 3 * 60;
 /** Defending side in a tower round: two jets, the rest on the ground. */
 export const DEFENDER_PILOTS = 2;
 export const DEFENDER_GROUND = 3;
@@ -201,6 +202,24 @@ export const GROUND = {
   maxAimPitch: 1.48,
 } as const;
 
+/**
+ * Round 11 (Sudden Death) safe zone: a vertical cylinder centred on the
+ * stadium. It holds for `holdSeconds`, then contracts to `endRadius` over
+ * `shrinkSeconds`, leaving the last seconds at the minimum. Jets outside it
+ * lose health every second, more the further it has closed. Starting playtest
+ * values: it opens wide enough to cover the whole flight volume, and the final
+ * circle still leaves room for a full-G turn at combat speed.
+ */
+export const SUDDEN_DEATH = {
+  holdSeconds: 60,
+  shrinkSeconds: 105,
+  startRadius: Math.hypot(480, 370) * A,
+  endRadius: 110 * A,
+  /** HP per second outside the zone: minDamage while it holds, rising to maxDamage once fully closed. */
+  minDamage: 3,
+  maxDamage: 20,
+} as const;
+
 /** Ground equipment, chosen during the preparation phase. Ammunition is per round. */
 export type GroundLoadout = 'balanced' | 'flak' | 'interceptor';
 export const GROUND_LOADOUTS: Record<GroundLoadout, { name: string; description: string; flak: number; sams: number }> = {
@@ -355,9 +374,23 @@ export type ProjectileState = {
   targetId: string | null;
 };
 
+/** The Round 11 safe zone as clients see it. */
+export type ZoneState = {
+  x: number;
+  z: number;
+  radius: number;
+  /** The radius it closes to. */
+  endRadius: number;
+  shrinking: boolean;
+  /** Seconds until it starts closing (0 once it has). */
+  closesIn: number;
+  /** HP per second for a jet outside it, right now. */
+  damage: number;
+};
+
 export type CombatEvent = {
   id: string;
-  type: 'jet-hit' | 'jet-down' | 'tower-hit' | 'tower-critical' | 'tower-down' | 'repair' | 'repair-interrupted' | 'barrier' | 'prep' | 'round-start' | 'round-end' | 'match-end' | 'boundary' | 'sides';
+  type: 'jet-hit' | 'jet-down' | 'tower-hit' | 'tower-critical' | 'tower-down' | 'repair' | 'repair-interrupted' | 'barrier' | 'prep' | 'round-start' | 'round-end' | 'match-end' | 'boundary' | 'sides' | 'zone';
   text: string;
   team?: Team;
   ownerId?: string;
@@ -376,6 +409,8 @@ export type RoundRecord = {
   defender: Team | null;
   winner: Team | null;
   reason: string;
+  /** Simulation tick the round was decided on (server-authoritative). */
+  tick: number;
 };
 
 export type RoomState = {
@@ -400,6 +435,8 @@ export type RoomState = {
   towers: TowerState[];
   stations: StationState[];
   projectiles: ProjectileState[];
+  /** The Sudden Death safe zone; null outside Round 11. */
+  zone: ZoneState | null;
   history: RoundRecord[];
   events: CombatEvent[];
 };
