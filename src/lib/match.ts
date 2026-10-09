@@ -1,5 +1,5 @@
 import {
-  ARENA, ARENA_SCALE, COMBAT, FLIGHT_SCALE, GRAVITY, COMBAT_COUNTDOWN_SECONDS, DEFENDER_PILOTS, GROUND, GROUND_LOADOUTS, LOBBY_SECONDS, MAX_ROUNDS, MAX_TEAM_SIZE, PREP_SECONDS,
+  ARENA, ARENA_SCALE, COMBAT, FLIGHT_SCALE, GRAVITY, METERS_PER_UNIT, COMBAT_COUNTDOWN_SECONDS, DEFENDER_PILOTS, GROUND, GROUND_LOADOUTS, LOBBY_SECONDS, MAX_ROUNDS, MAX_TEAM_SIZE, PREP_SECONDS,
   PROJECTILE_SPEED, REGULATION_ROUNDS, ROUNDS_PER_HALF, ROUND_SECONDS, TEAM_NAMES, TIEBREAKER_SECONDS, TOWER, WINS_NEEDED, otherTeam, towerLayout,
   type ArenaId, type CombatEvent, type GroundLoadout, type JetModel, type JetState, type MatchPhase, type PlayerInput, type ProjectileKind, type ProjectileState,
   type Role, type RolePreference, type RoomState, type RoundKind, type RoundRecord, type StationState, type Team, type TowerState,
@@ -41,7 +41,7 @@ export type MatchPlayer = JetState & {
   transitTotal: number;
 };
 
-type MatchProjectile = ProjectileState & { vx: number; vy: number; vz: number; life: number; damage: number; turn: number; age: number };
+type MatchProjectile = ProjectileState & { vx: number; vy: number; vz: number; life: number; damage: number; turn: number; age: number; losYaw?: number; losPitch?: number };
 type MatchTower = TowerState & { defenceReadyAt: number; barrierUntil: number };
 
 export type MatchRoom = {
@@ -400,7 +400,8 @@ function pilotTarget(room: MatchRoom, jet: MatchPlayer) {
     if (!other.alive || other.team === jet.team || other.role !== 'pilot') continue;
     const dx = other.x - jet.x; const dy = other.y - jet.y; const dz = other.z - jet.z;
     const distance = Math.hypot(dx, dy, dz);
-    if (distance < bestDistance && facingOf(dx, dy, dz, distance) > .18) { bestDistance = distance; best = other.id; }
+    // Lock only inside the missile seeker's field of view, or it would drop the lock at launch.
+    if (distance < bestDistance && facingOf(dx, dy, dz, distance) > Math.cos(COMBAT.missileSeekerCone * .85)) { bestDistance = distance; best = other.id; }
   }
   if (best) return best;
   bestDistance = COMBAT.groundLockRange;
@@ -408,14 +409,14 @@ function pilotTarget(room: MatchRoom, jet: MatchPlayer) {
     if (!other.alive || other.team === jet.team || other.role !== 'ground') continue;
     const dx = other.x - jet.x; const dy = other.y - jet.y; const dz = other.z - jet.z;
     const distance = Math.hypot(dx, dy, dz);
-    if (distance < bestDistance && facingOf(dx, dy, dz, distance) > .45) { bestDistance = distance; best = other.id; }
+    if (distance < bestDistance && facingOf(dx, dy, dz, distance) > Math.cos(COMBAT.missileSeekerCone * .85)) { bestDistance = distance; best = other.id; }
   }
   for (const tower of room.towers) {
     if (tower.hp <= 0 || tower.team === jet.team) continue;
     const aim = towerAimPoint(tower);
     const dx = aim.x - jet.x; const dy = aim.y - jet.y; const dz = aim.z - jet.z;
     const distance = Math.hypot(dx, dy, dz) - TOWER.radius;
-    if (distance < bestDistance && facingOf(dx, dy, dz, distance + TOWER.radius) > .45) { bestDistance = distance; best = `tower:${tower.id}`; }
+    if (distance < bestDistance && facingOf(dx, dy, dz, distance + TOWER.radius) > Math.cos(COMBAT.missileSeekerCone * .85)) { bestDistance = distance; best = `tower:${tower.id}`; }
   }
   return best;
 }
@@ -523,7 +524,7 @@ function stepPilot(room: MatchRoom, jet: MatchPlayer, now: number, dt: number) {
     const side = jet.pylon; jet.pylon = -jet.pylon;
     // Right vector in this world is (-cos yaw, 0, sin yaw).
     const pylon = { x: jet.x - Math.cos(jet.yaw) * side * 5 * FLIGHT_SCALE + nose[0] * 2 * FLIGHT_SCALE, y: jet.y - 1.6 * FLIGHT_SCALE, z: jet.z + Math.sin(jet.yaw) * side * 5 * FLIGHT_SCALE + nose[2] * 2 * FLIGHT_SCALE };
-    fire(room, jet, 'missile', pylon, jet.yaw, jet.pitch, COMBAT.missileDamage, 5.5, jet.targetId, jet.targetId ? 1.8 : 0, Math.max(jet.speed, 60 * FLIGHT_SCALE));
+    fire(room, jet, 'missile', pylon, jet.yaw, jet.pitch, COMBAT.missileDamage, COMBAT.missileLife, jet.targetId, jet.targetId ? 1 : 0, Math.max(jet.speed, 60 * FLIGHT_SCALE));
     jet.missileReadyAt = now + COMBAT.missileReload * 1_000;
   }
   jet.missileCooldown = Math.max(0, (jet.missileReadyAt - now) / 1_000);
@@ -648,7 +649,7 @@ function stepGround(room: MatchRoom, unit: MatchPlayer, now: number, dt: number)
       unit.cannonReadyAt = now + GROUND.flakInterval * 1_000;
     }
     if (input.secondary && now >= unit.missileReadyAt && unit.samAmmo > 0) {
-      fire(room, unit, 'sam', muzzle, unit.yaw, Math.max(unit.pitch, .25), GROUND.samDamage, 6, unit.targetId, unit.targetId ? GROUND.samTurn : 0, 60 * FLIGHT_SCALE);
+      fire(room, unit, 'sam', muzzle, unit.yaw, Math.max(unit.pitch, .25), GROUND.samDamage, COMBAT.missileLife, unit.targetId, unit.targetId ? 1 : 0, 60 * FLIGHT_SCALE);
       unit.samAmmo -= 1;
       unit.missileReadyAt = now + GROUND.samCooldown * 1_000;
     }
@@ -696,6 +697,40 @@ function homingPoint(room: MatchRoom, targetId: string): Point | null {
   return target?.alive ? target : null;
 }
 
+/**
+ * Proportional navigation, as real missiles home: turn at N times the rate the
+ * line of sight rotates (plus a little pursuit so a target dead ahead stays
+ * centred), limited by how many g the airframe can pull at its current speed.
+ * If the target slips outside the seeker's field of view, the lock is lost and
+ * the missile flies on straight.
+ */
+function guide(room: MatchRoom, shot: MatchProjectile, dt: number) {
+  const goal = homingPoint(room, shot.targetId!);
+  if (!goal) { shot.targetId = null; return; }
+  const dx = goal.x - shot.x; const dy = goal.y - shot.y; const dz = goal.z - shot.z;
+  const range = Math.hypot(dx, dy, dz);
+  const heading = direction(shot.yaw, shot.pitch);
+  if ((dx * heading.x + dy * heading.y + dz * heading.z) / Math.max(range, 1) < Math.cos(COMBAT.missileSeekerCone)) {
+    shot.targetId = null;
+    shot.losYaw = undefined; shot.losPitch = undefined;
+    return;
+  }
+  const losYaw = Math.atan2(dx, dz);
+  const losPitch = Math.atan2(dy, Math.hypot(dx, dz));
+  const yawRate = shot.losYaw === undefined ? 0 : angleDelta(shot.losYaw, losYaw) / dt;
+  const pitchRate = shot.losPitch === undefined ? 0 : angleDelta(shot.losPitch, losPitch) / dt;
+  shot.losYaw = losYaw; shot.losPitch = losPitch;
+  // Turn-rate limit from the g limit: a = v·ω, so ω = maxG·g / v (in world units).
+  const maxTurn = Math.min(4, (COMBAT.missileMaxG * 9.81 / METERS_PER_UNIT) / Math.max(shot.speed, 1));
+  const pursuit = 1.2;
+  const commandYaw = COMBAT.missileNavigation * yawRate + pursuit * angleDelta(shot.yaw, losYaw);
+  const commandPitch = COMBAT.missileNavigation * pitchRate + pursuit * angleDelta(shot.pitch, losPitch);
+  shot.yaw += clamp(commandYaw, -maxTurn, maxTurn) * dt;
+  shot.pitch += clamp(commandPitch, -maxTurn, maxTurn) * dt;
+  const next = direction(shot.yaw, shot.pitch);
+  shot.vx = next.x * shot.speed; shot.vy = next.y * shot.speed; shot.vz = next.z * shot.speed;
+}
+
 function stepProjectiles(room: MatchRoom, now: number, dt: number) {
   for (let index = room.projectiles.length - 1; index >= 0; index -= 1) {
     const shot = room.projectiles[index];
@@ -714,16 +749,7 @@ function stepProjectiles(room: MatchRoom, now: number, dt: number) {
       shot.vy -= GRAVITY * dt;
       shot.pitch = Math.atan2(shot.vy, Math.hypot(shot.vx, shot.vz));
     }
-    if (motor && shot.turn && shot.targetId) {
-      const goal = homingPoint(room, shot.targetId);
-      if (goal) {
-        const dx = goal.x - shot.x; const dy = goal.y - shot.y; const dz = goal.z - shot.z;
-        shot.yaw += clamp(angleDelta(shot.yaw, Math.atan2(dx, dz)), -shot.turn * dt, shot.turn * dt);
-        shot.pitch += clamp(angleDelta(shot.pitch, Math.atan2(dy, Math.hypot(dx, dz))), -shot.turn * .75 * dt, shot.turn * .75 * dt);
-        const heading = direction(shot.yaw, shot.pitch);
-        shot.vx = heading.x * shot.speed; shot.vy = heading.y * shot.speed; shot.vz = heading.z * shot.speed;
-      }
-    }
+    if (motor && shot.turn && shot.targetId) guide(room, shot, dt);
     shot.x += shot.vx * dt; shot.y += shot.vy * dt; shot.z += shot.vz * dt;
     const gone = shot.life <= 0 || Math.abs(shot.x) > ARENA.halfWidth + COMBAT.projectileMargin || Math.abs(shot.z) > ARENA.halfDepth + COMBAT.projectileMargin
       || shot.y < 0 || shot.y > ARENA.maxAltitude + COMBAT.projectileMargin;
@@ -737,7 +763,8 @@ function hitSomething(room: MatchRoom, shot: MatchProjectile, previous: Point, n
     const ground = target.role === 'ground';
     // Flak is anti-aircraft only; its proximity fuse widens the hit.
     if (shot.kind === 'flak' && ground) continue;
-    const radius = ground ? GROUND.hitRadius : shot.kind === 'flak' ? COMBAT.jetHitRadius * GROUND.flakFuse : COMBAT.jetHitRadius;
+    // Flak and missiles carry proximity fuses; cannon rounds must hit.
+    const radius = ground ? GROUND.hitRadius : shot.kind === 'flak' ? COMBAT.jetHitRadius * GROUND.flakFuse : shot.kind === 'cannon' ? COMBAT.jetHitRadius : COMBAT.missileFuse;
     if (distanceToSegment(target, previous, shot) > radius) continue;
     damagePlayer(room, target, shot.damage, shot.ownerId, shot.team);
     return true;

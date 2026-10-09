@@ -80,7 +80,11 @@ All of these are starting playtest values, not final balance. They live in `TOWE
 
 - **Weapons:**
   - **Cannon.** Rounds leave with slight dispersion and drop under gravity. They show as glowing tracers with a muzzle flash.
-  - **Missiles.** Missiles drop from alternating wing pylons, then the motor lights and accelerates them, leaving a flame and smoke trail. With a lock they guide; without one they fly straight. They end in a fireball.
+  - **Missiles.** Missiles drop from alternating wing pylons, then the motor lights at about 30 g and accelerates them to roughly **Mach 3** (interceptors slightly faster), leaving a flame and smoke trail.
+    - With a lock (up to about 1.8 km on jets) they home by **proportional navigation**, limited to 45 g.
+    - Break hard enough to leave the seeker's field of view (about 50°) and the missile loses you and flies straight on.
+    - Without a lock they fly straight.
+    - A proximity fuse detonates them near a jet; otherwise they self-destruct after 8 s.
   - **Flak.** Shells burst in black puffs.
   - **Sound.** Each weapon has its own.
 - **Threat warnings:**
@@ -99,7 +103,7 @@ The rules live in `src/lib/match.ts`, a pure module with time passed in. The mul
 
 The arena runs along the long (X) axis. Blue's home end is the west and Red's is the east, each with two military airfields. The Skyforge reactor stands at dead centre with open airspace around it. The defending team's three towers, six gun stations and three repair pads stand at its own end: west in rounds 1–5, east in rounds 6–10.
 
-- **Flight volume** — 17280 × 13320 with a 5400-unit ceiling, wrapped in a hex-latticed energy barrier drawn exactly on the server's play volume. Hitting it ripples the barrier at the contact point.
+- **Flight volume** — 34560 × 26640 with a 10800-unit ceiling, wrapped in a hex-latticed energy barrier drawn exactly on the server's play volume. Hitting it ripples the barrier at the contact point.
 - **Stands** — three elliptical tiers separated by concourses, closed by a glazed facade and a cantilevered roof ring edged with lights. The crowd is drawn per pixel by a shader rather than as geometry: seated spectators with shirts, heads and hair, team-coloured home ends behind each base, aisles, vomitory tunnels, a travelling Mexican wave, card-stunt tifos in the home ends every 40s and after core alerts, and phone lights after dark. Far stands fade to smoothly filtered crowd colour instead of shimmering, and phone flashes only appear where individual people are resolved.
 - **Banners and flags** — twenty Blue and Red drapes with crests and fringes hang from the roof ring; their cloth ripples and the folds catch the light. About 1,400 fan flags wave in the stands, clustered in the home ends.
 - **Screens** — two giant end scoreboards plus four angled corner broadcast panels sharing one live canvas (score and round pips, round clock, which team defends, ticker, alert card), and continuous LED ribbon boards on the pitch wall and both tier fascias.
@@ -119,10 +123,10 @@ Jets are built in `src/lib/jets.ts`: a flattened blended fuselage with nose chin
 
 Two dials in `src/lib/protocol.ts` multiply values authored against the original 480-unit arena:
 
-- `ARENA_SCALE` (currently `18`) sizes the place: flight volume, stadium shell, airfields, boundaries and spawn spread.
+- `ARENA_SCALE` (currently `36`) sizes the place: flight volume, stadium shell, airfields, towers, stations, boundaries, spawn spread, the Weapons Tower's reach and ground-unit driving speed.
 - `FLIGHT_SCALE` (currently `3`) sizes the jets' world: speeds, accelerations, weapon ranges, lock ranges and hit radii.
 
-Crossing time is `ARENA_SCALE / FLIGHT_SCALE` times the original, so it is the **ratio** that decides how roomy a 5v5 feels — about 20 seconds nose-to-tail at full throttle today. Raise `FLIGHT_SCALE` to make the arena feel tighter without shrinking it. Scaling both by the same factor makes the stadium look bigger but leaves the fight exactly as cramped. Angular rates never scale.
+Crossing time is `ARENA_SCALE / FLIGHT_SCALE` times the original, so it is the **ratio** that decides how roomy a 5v5 feels — about 40 seconds nose-to-tail at full throttle today. Raise `FLIGHT_SCALE` to make the arena feel tighter without shrinking it. Scaling both by the same factor makes the stadium look bigger but leaves the fight exactly as cramped. Angular rates never scale.
 
 The stadium shell is modelled against the original 1x arena and scaled up as one group (`SHELL_SCALE`). Only the energy barrier, weather and spark bursts are built in world space, because they must line up with server coordinates exactly. Seats are a fixed world size (`SEAT_WIDTH`, `ROW_DEPTH` in `skyforge.ts`), so a bigger bowl simply holds more people.
 

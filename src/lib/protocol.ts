@@ -34,7 +34,7 @@ export const DEFENDER_GROUND = 3;
  * Crossing time is ARENA_SCALE / FLIGHT_SCALE times the original, so it is the
  * RATIO that decides how roomy a 5v5 feels. Angular rates never scale.
  */
-export const ARENA_SCALE = 18;
+export const ARENA_SCALE = 36;
 export const FLIGHT_SCALE = 3;
 export const ARENA = {
   halfWidth: 480 * ARENA_SCALE,
@@ -105,11 +105,15 @@ export const COMBAT = {
   jetHitRadius: 15 * S,
   muzzleOffset: 12 * S,
   cannonSpeed: 500 * S,
-  missileSpeed: 235 * S,
-  /** Lock range on jets (about 2.5 s of closing at combat speed). */
-  jetLockRange: 600 * S,
+  /**
+   * Missile top speed after the motor burn: about Mach 3 (instruments use
+   * METERS_PER_UNIT = 0.42), against a jet's Mach 0.9–1.4.
+   */
+  missileSpeed: 800 * S,
+  /** Lock range on jets (about 1.8 km). */
+  jetLockRange: 1_400 * S,
   /** Missiles can lock a tower or a ground unit from further out: they're big and don't move. */
-  groundLockRange: 700 * S,
+  groundLockRange: 1_700 * S,
   boundaryWarn: 72 * A,
   boundaryInset: 24 * A,
   projectileMargin: 30 * A,
@@ -118,7 +122,16 @@ export const COMBAT = {
   cannonDamage: 13,
   /** Cannon dispersion (radians either side) and the missile motor's acceleration. */
   cannonSpread: .0035,
-  missileAccel: 260 * S,
+  /** Motor thrust: about 30 g, so full speed comes roughly 2.5 s after ignition. */
+  missileAccel: 300 * S,
+  /** Guidance: proportional-navigation constant, turn limit in g, seeker field of view (half-angle, radians). */
+  missileNavigation: 4,
+  missileMaxG: 45,
+  missileSeekerCone: .9,
+  /** Proximity fuse: detonates this close to a jet. */
+  missileFuse: 34 * S,
+  /** Seconds before an unexploded missile self-destructs. */
+  missileLife: 8,
   /** Missiles fall clear of the pylon this long before the motor lights and guidance starts. */
   missileDrop: .22,
   /** Missile reload, seconds. */
@@ -149,7 +162,7 @@ export const TOWER = {
   repairCooldown: 30,
   repairCharges: 3,
   /** Weapons Tower: automated, leading flak. Crewed, it fires faster. */
-  weaponsRange: 380 * S,
+  weaponsRange: 65 * A,
   weaponsInterval: .34,
   weaponsCrewedInterval: .18,
   weaponsDamage: 6,
@@ -171,11 +184,10 @@ export const GROUND = {
   flakFuse: 2.2,
   flakSpread: .01,
   /** Interceptor missile (SAM): radar-guided, limited per round. */
-  samSpeed: 255 * S,
-  samTurn: 2.5,
+  samSpeed: 880 * S,
   samDamage: 60,
   samCooldown: 6,
-  samLockRange: 560 * S,
+  samLockRange: 1_500 * S,
   /** cos of the half-angle a SAM can lock inside. */
   samLockCone: .88,
   /** Shield activation: cuts damage to the tower beside you for a few seconds. */
@@ -183,7 +195,7 @@ export const GROUND = {
   barrierDuration: 6,
   barrierCooldown: 40,
   /** Driving speed between stations, units/s, plus a fixed time to pack up and redeploy. */
-  driveSpeed: 900,
+  driveSpeed: 50 * A,
   redeploy: 1.2,
   minAimPitch: .02,
   maxAimPitch: 1.48,
