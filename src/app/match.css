@@ -245,6 +245,8 @@
 .combat-screen .team-panel { width: 236px; }
 
 .combat-screen .weapon-readout b { color: #8ff0ff; }
+/* Lights up the instant the trigger reaches the game. */
+.combat-screen .weapon-readout b.trigger-live { color: #ffb347; }
 .combat-screen .weapon-readout { gap: 4px; }
 .tower-status-row .objective-note { padding: 6px 8px; background: rgba(6, 12, 20, .72); border: 1px solid rgba(193, 220, 237, .14); }
 

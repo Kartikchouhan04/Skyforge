@@ -803,7 +803,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
             <div className="instrument"><span>THR</span><b>{self ? Math.round(self.throttle * 100) : '--'}</b><small>{self?.burner ? 'AB' : '%'}</small></div>
             <div className="instrument"><span>HDG</span><b>{self ? heading(self.yaw) : '---'}</b><small>DEG</small></div>
             {self?.gcas ? <div className="flight-warning">PULL UP</div> : self?.stall ? <div className="flight-warning">STALL</div> : null}
-            <div className="weapon-readout"><span>GUN <b>READY</b></span><span>MISSILE (RMB) <b>{self?.missileCooldown ? `${self.missileCooldown.toFixed(1)}S` : self?.targetId ? 'LOCKED — FIRE' : 'READY · NO LOCK'}</b></span></div>
+            <div className="weapon-readout"><span>GUN (LMB / F) <b className={primaryRef.current || keysRef.current.has('f') ? 'trigger-live' : ''}>{primaryRef.current || keysRef.current.has('f') ? 'FIRING' : 'READY'}</b></span><span>MISSILE (RMB / R) <b>{self?.missileCooldown ? `${self.missileCooldown.toFixed(1)}S` : self?.targetId ? 'LOCKED — FIRE' : 'READY · NO LOCK'}</b></span></div>
           </div>}
 
           {isGunner && self?.alive && stations.length > 0 && <div className="station-picker" role="group" aria-label="Gun stations">

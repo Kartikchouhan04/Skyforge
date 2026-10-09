@@ -762,15 +762,66 @@ function wallGeometry(radiusX: number, radiusZ: number, bottom: number, top: num
  * mouths, a travelling Mexican wave, card-stunt tifos and phone lights at
  * night. Costs nothing per spectator, so the bowl can hold a city.
  */
+/** Slogans on the fans' banners: four Blue designs, then four Red. */
+const CROWD_BANNERS: { text: string; ground: string; ink: string; trim: string }[] = [
+  { text: 'BLUE ARMY', ground: '#0d4f9e', ink: '#ffffff', trim: '#7fd3ff' },
+  { text: 'HOLD THE LINE', ground: '#f2f6fa', ink: '#0d4f9e', trim: '#1b8be0' },
+  { text: 'SKYFORGE BLUE', ground: '#06315a', ink: '#8fe3ff', trim: '#ffffff' },
+  { text: 'DEFEND THE TOWERS', ground: '#1b8be0', ink: '#ffffff', trim: '#06315a' },
+  { text: 'RED STORM', ground: '#a3121f', ink: '#ffffff', trim: '#ffb0b8' },
+  { text: 'BURN THE SKY', ground: '#f6f0ee', ink: '#a3121f', trim: '#e0303f' },
+  { text: 'RED NATION', ground: '#4a0710', ink: '#ff8c95', trim: '#ffffff' },
+  { text: 'ALL OR NOTHING', ground: '#e0303f', ink: '#ffffff', trim: '#4a0710' },
+];
+
+/** Paints the fans' banners into one atlas (8 across) that the crowd shader samples. */
+function createCrowdBannerAtlas() {
+  const cellWidth = 512;
+  const cellHeight = 96;
+  const canvas = document.createElement('canvas');
+  canvas.width = cellWidth * CROWD_BANNERS.length;
+  canvas.height = cellHeight;
+  const context = canvas.getContext('2d');
+  if (context) {
+    CROWD_BANNERS.forEach((banner, index) => {
+      const x = index * cellWidth;
+      context.fillStyle = banner.ground;
+      context.fillRect(x, 0, cellWidth, cellHeight);
+      // Hand-painted look: a trim band top and bottom, and a diamond at each end.
+      context.fillStyle = banner.trim;
+      context.fillRect(x, 6, cellWidth, 7);
+      context.fillRect(x, cellHeight - 13, cellWidth, 7);
+      for (const cx of [x + 32, x + cellWidth - 32]) {
+        context.beginPath();
+        context.moveTo(cx, 30); context.lineTo(cx + 16, 48); context.lineTo(cx, 66); context.lineTo(cx - 16, 48);
+        context.closePath();
+        context.fill();
+      }
+      context.fillStyle = banner.ink;
+      context.font = '800 52px "Barlow Condensed", Rajdhani, Arial, sans-serif';
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      context.fillText(banner.text, x + cellWidth / 2, cellHeight / 2 + 2, cellWidth - 110);
+    });
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  return texture;
+}
+
 function crowdSurfaceMaterial(rig: Rig) {
   const material = new THREE.MeshStandardMaterial({
     color: 0xffffff, roughness: .88, metalness: .02, side: THREE.DoubleSide,
   });
   material.defines = { USE_UV: '' };
+  const bannerAtlas = createCrowdBannerAtlas();
+  material.userData.bannerAtlas = bannerAtlas;
   material.onBeforeCompile = (shader) => {
     Object.assign(shader.uniforms, rig.crowdUniforms, {
       crowdSeat: { value: new THREE.Vector2(SEAT_WIDTH, ROW_DEPTH) },
       crowdTifoBand: { value: 34 * SHELL_SCALE },
+      crowdBanner: { value: bannerAtlas },
     });
     shader.vertexShader = `varying vec3 vCrowdWorld;
 ${shader.vertexShader}`.replace(
@@ -785,6 +836,7 @@ uniform float crowdNight;
 uniform float crowdTifo;
 uniform vec2 crowdSeat;
 uniform float crowdTifoBand;
+uniform sampler2D crowdBanner;
 varying vec3 vCrowdWorld;
 float cHash(vec2 p) {
   p = mod(p, 4096.0);
@@ -842,7 +894,9 @@ ${shader.fragmentShader}`.replace(
       float aisle = step(aisleCol, 0.99);
       float tunnel = step(mod(block, 4.0), 0.5) * step(9.0, aisleCol) * step(aisleCol, 19.0)
         * step(30.0, cell.y) * step(cell.y, 44.0);
-      float occupied = step(0.06 + (1.0 - abs(team)) * 0.07, h3) * (1.0 - aisle) * (1.0 - tunnel);
+      // Empty seats come in small clusters, the way real crowds thin out; the home ends stay packed.
+      float emptyPatch = step(0.84, crowdNoise(seatUv / vec2(7.0, 3.0) + 31.0)) * (1.0 - abs(team));
+      float occupied = step(0.04 + (1.0 - abs(team)) * 0.04, h3) * (1.0 - emptyPatch) * (1.0 - aisle) * (1.0 - tunnel);
 
       vec3 tifoBase = vCrowdWorld.x < 0.0 ? vec3(0.08, 0.46, 0.80) : vec3(0.76, 0.08, 0.16);
       float band = step(0.5, fract(vCrowdWorld.y / crowdTifoBand + (vCrowdWorld.x < 0.0 ? 0.0 : 0.5)));
@@ -884,18 +938,47 @@ ${shader.fragmentShader}`.replace(
         float crest = smoothstep(0.0, 0.02, travel) * (1.0 - smoothstep(0.02, 0.07, travel));
         float stand = clamp(crest * crowdWave + step(0.965, h2) * crowdIdle, 0.0, 1.0);
         float bob = sin(crowdTime * (2.0 + h1 * 3.0) + h2 * 30.0) * 0.025 * crowdIdle;
-        vec2 p = f - vec2(0.5 + (h4 - 0.5) * 0.1, 0.0);
+        // Build: children to big adults, each sitting a little off-centre.
+        float build = 0.84 + fract(h1 * 7.31) * 0.3;
+        vec2 p = f - vec2(0.5 + (h4 - 0.5) * 0.12, 0.0);
         p.y -= stand * 0.22 + bob;
-        float torso = cBox(p - vec2(0.0, 0.40), vec2(0.31 + h1 * 0.05, 0.22), 0.13);
+        p /= build;
+        float torso = cBox(p - vec2(0.0, 0.40), vec2(0.30 + h1 * 0.06, 0.22), 0.13);
         float armL = cBox(p - vec2(-0.36, 0.62 + stand * 0.12), vec2(0.055, 0.07 + stand * 0.18), 0.05);
         float armR = cBox(p - vec2(0.36, 0.62 + stand * 0.12), vec2(0.055, 0.07 + stand * 0.18), 0.05);
         float body = min(torso, mix(1.0, min(armL, armR), step(0.35, stand)));
-        float head = length((p - vec2(0.0, 0.76)) * vec2(1.0, 0.9)) - 0.155;
-        vec3 skin = mix(vec3(0.80, 0.56, 0.42), vec3(0.18, 0.10, 0.06), h4);
-        vec3 hair = mix(vec3(0.03, 0.025, 0.02), vec3(0.42, 0.28, 0.12), step(0.8, h2));
-        vec3 headColor = mix(skin, hair, smoothstep(0.04, 0.11, p.y - 0.76));
-        near = mix(near, cShirt(h1, team), occupied * (1.0 - smoothstep(-aa, aa, body)));
+        float head = length((p - vec2(0.0, 0.76)) * vec2(1.0, 0.92)) - 0.15;
+        // Skin: a realistic spread from light to deep brown.
+        float tone = fract(h4 * 3.71);
+        vec3 skin = tone < 0.5
+          ? mix(vec3(0.89, 0.70, 0.58), vec3(0.72, 0.50, 0.36), tone * 2.0)
+          : mix(vec3(0.72, 0.50, 0.36), vec3(0.30, 0.19, 0.13), (tone - 0.5) * 2.0);
+        // Hair: mostly dark, some brown, blonde, grey; some wear caps.
+        float hairPick = fract(h2 * 5.13);
+        vec3 hair = hairPick < 0.55 ? vec3(0.03, 0.025, 0.02) : hairPick < 0.8 ? vec3(0.20, 0.12, 0.06)
+          : hairPick < 0.92 ? vec3(0.62, 0.48, 0.24) : vec3(0.55, 0.55, 0.55);
+        float cap = step(0.8, fract(h3 * 9.7));
+        vec3 capColor = abs(team) > 0.5 && fract(h3 * 17.1) < 0.7 ? (team < 0.0 ? vec3(0.08, 0.40, 0.75) : vec3(0.70, 0.08, 0.14)) : vec3(0.08, 0.08, 0.09);
+        vec3 crown = mix(hair, capColor, cap);
+        float crownLine = cap > 0.5 ? 0.02 : 0.06;
+        vec3 headColor = mix(skin, crown, smoothstep(crownLine, crownLine + 0.05, p.y - 0.76));
+        // Light from above: faces lit on one side, chins and the far cheek in shade.
+        headColor *= 0.82 + 0.3 * clamp(0.5 - p.x * 1.6 + (p.y - 0.76) * 1.2, 0.0, 1.0);
+        // Shirts: lit on the shoulders, darker at the sides and in the lap.
+        vec3 shirt = cShirt(h1, team);
+        shirt *= (0.7 + 0.4 * clamp((p.y - 0.18) / 0.5, 0.0, 1.0)) * (1.0 - 0.28 * smoothstep(0.14, 0.34, abs(p.x)));
+        // Team scarves round the neck; standing fans hold them up overhead.
+        float scarfOwner = step(abs(team) > 0.5 ? 0.45 : 0.85, fract(h2 * 11.3));
+        vec3 scarfColor = team < 0.0 || (team == 0.0 && h4 < 0.5) ? vec3(0.08, 0.42, 0.80) : vec3(0.74, 0.08, 0.15);
+        scarfColor = mix(scarfColor, vec3(0.92), step(0.5, fract(p.x * 6.0 + 0.25)) * 0.8);
+        float scarfNeck = cBox(p - vec2(0.0, 0.585), vec2(0.20, 0.035), 0.02);
+        float scarfUp = cBox(p - vec2(0.0, 0.98), vec2(0.36, 0.05), 0.02) + (1.0 - step(0.35, stand)) * 9.0;
+        near = mix(near, shirt, occupied * (1.0 - smoothstep(-aa, aa, body)));
+        near = mix(near, scarfColor, occupied * scarfOwner * (1.0 - smoothstep(-aa, aa, scarfNeck)));
         near = mix(near, headColor, occupied * (1.0 - smoothstep(-aa, aa, head)));
+        near = mix(near, scarfColor, occupied * scarfOwner * (1.0 - smoothstep(-aa, aa, scarfUp)));
+        // The row in front shades the lower part of each seat.
+        near *= 0.8 + 0.2 * smoothstep(0.0, 0.32, f.y);
 
         vec3 stairs = vec3(0.40, 0.42, 0.44) * (0.75 + 0.25 * step(0.5, f.y));
         stairs = mix(stairs, vec3(0.80, 0.62, 0.10), step(f.y, 0.07));
@@ -909,6 +992,34 @@ ${shader.fragmentShader}`.replace(
 
       // A packed crowd reads darker than any one shirt: fabric, shadow, gaps.
       color *= 0.52;
+
+      // Fans' banners held up across the rows, in about one block in three:
+      // team slogans at each home end, a mix along the sides.
+      vec2 bannerGrid = vec2(28.0, 8.0);
+      vec2 bannerCell = floor(seatUv / bannerGrid);
+      vec2 inBlock = seatUv - bannerCell * bannerGrid;
+      float bannerSeed = cHash(bannerCell + 91.7);
+      vec2 bannerSize = vec2(13.0 + floor(cHash(bannerCell + 4.4) * 6.0), 2.2);
+      vec2 bannerStart = vec2(2.0 + floor(cHash(bannerCell + 3.1) * (25.0 - bannerSize.x)), 1.5 + floor(cHash(bannerCell + 8.4) * 4.0));
+      vec2 bannerLocal = (inBlock - bannerStart) / bannerSize;
+      // The cloth ripples along its length.
+      float ripple = sin(bannerLocal.x * 10.0 + crowdTime * 2.2 + bannerSeed * 40.0);
+      bannerLocal.y += ripple * 0.035;
+      float bannerIn = step(0.66, bannerSeed) * (1.0 - tifoMix)
+        * smoothstep(0.0, 0.015, bannerLocal.x) * (1.0 - smoothstep(0.985, 1.0, bannerLocal.x))
+        * smoothstep(0.0, 0.05, bannerLocal.y) * (1.0 - smoothstep(0.95, 1.0, bannerLocal.y));
+      float bannerPick = floor(cHash(bannerCell + 5.5) * 4.0);
+      float bannerSide = team < -0.5 ? 0.0 : (team > 0.5 ? 4.0 : step(0.5, cHash(bannerCell + 2.2)) * 4.0);
+      vec2 atlasUv = vec2((bannerSide + bannerPick + clamp(bannerLocal.x, 0.002, 0.998)) / 8.0, clamp(bannerLocal.y, 0.03, 0.97));
+      vec3 bannerColor = texture2D(crowdBanner, atlasUv).rgb * (0.62 + 0.1 * ripple);
+      // Poles at each end, held by the fans below.
+      float poleX = min(abs(bannerLocal.x), abs(bannerLocal.x - 1.0)) * bannerSize.x;
+      float pole = step(0.66, bannerSeed) * (1.0 - tifoMix) * (1.0 - smoothstep(0.08, 0.08 + px, poleX))
+        * step(-0.45, bannerLocal.y) * step(bannerLocal.y, 1.08);
+      // Far away a banner is a few pixels: let it fade into the crowd rather than shimmer.
+      float bannerFade = 1.0 - smoothstep(1.5, 3.5, px);
+      color = mix(color, vec3(0.05, 0.05, 0.06), pole * bannerFade);
+      color = mix(color, bannerColor, bannerIn * bannerFade);
       if (!gl_FrontFacing) color = vec3(0.22, 0.24, 0.27);
       diffuseColor.rgb *= color;
 
@@ -916,7 +1027,7 @@ ${shader.fragmentShader}`.replace(
       float flash = step(0.992, h2) * step(0.86, fract(crowdTime * (0.3 + h1) + h3 * 10.0)) * resolved;
       float torch = step(0.975, h1) * crowdNight * 0.6 * resolved;
       totalEmissiveRadiance += vec3(1.0, 0.97, 0.9) * (flash * 1.4 + torch) * occupied * personShape
-        * (gl_FrontFacing ? 1.0 : 0.0);
+        * (1.0 - bannerIn * bannerFade) * (gl_FrontFacing ? 1.0 : 0.0);
       `,
     );
   };
