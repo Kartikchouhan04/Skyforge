@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type FormEvent, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { ArenaView } from '@/components/arena-view';
 import { AttitudeIndicator } from '@/components/attitude-indicator';
 import { RadarScope } from '@/components/radar-scope';
@@ -263,8 +263,10 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
         throttle: Number(down('w')) - Number(down('s')),
         boost: down(' '),
         airBrake: down('shift'),
-        primary: primaryRef.current || now < primaryPulseUntilRef.current,
-        secondary: secondaryRef.current || now < secondaryPulseUntilRef.current,
+        // Keyboard fire as well as the mouse: laptop touchpads ignore clicks
+        // while keys are held, so turning with A·D·Q·E would block the trigger.
+        primary: primaryRef.current || now < primaryPulseUntilRef.current || down('f'),
+        secondary: secondaryRef.current || now < secondaryPulseUntilRef.current || down('r'),
       };
     }
     if (trainingModeRef.current) {
@@ -493,32 +495,55 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     updateMouseAim(event.movementX, event.movementY);
   }
 
-  /**
-   * Mouse buttons come from mousedown/mouseup, not pointer events: a second
-   * button pressed while the first is held (RMB missile while LMB fires the
-   * cannon) sends no new pointerdown, so the missile would never launch.
-   */
-  function handleCombatMouseDown(event: ReactMouseEvent<HTMLElement>) {
-    if (performance.now() - lastTouchAtRef.current < 800) return;
-    const target = event.target as HTMLElement;
-    if (!target.closest('.arena-view') || target.closest('button, a, input')) return;
-    if (event.button === 2) event.preventDefault();
-    const canvas = event.currentTarget.querySelector('.arena-canvas') as HTMLCanvasElement | null;
-    // Browsers may refuse pointer lock (e.g. just after Esc); the mouse still works unlocked.
-    if (canvas && document.pointerLockElement !== canvas) Promise.resolve(canvas.requestPointerLock?.()).catch(() => {});
-    unlockAudio();
-    const self = selfPlayer();
-    if (self && !self.alive) { cycleSpectate(event.button === 2 ? -1 : 1); return; }
-    if (event.button === 0) { primaryRef.current = true; primaryPulseUntilRef.current = performance.now() + 80; }
-    if (event.button === 2) { secondaryRef.current = true; secondaryPulseUntilRef.current = performance.now() + 80; }
-    sendControls();
-  }
-
   useEffect(() => {
     if (!connected) return;
+    /** Letter keys by physical position (KeyF → 'f'), so Shift, Caps Lock or a held modifier can't change what they do. */
+    const keyName = (event: KeyboardEvent) => (event.code.startsWith('Key') ? event.code.slice(3).toLowerCase() : event.key.toLowerCase());
+    // Clicks on real controls (buttons, menus, panels) never fire weapons.
+    const UI = 'button, a, input, select, label, .combat-header, .results-screen, .prep-panel, .station-picker, .awaiting-card, .arena-picker-backdrop, .training-loadout';
+    let uiPress = false;
+    /**
+     * Mouse buttons are read from the whole window, not just the 3D view: with
+     * the cursor unlocked, turning drifts it over HUD panels and the click was
+     * lost. mousedown/mouseup (not pointer events) because a second button
+     * pressed while the first is held sends no new pointerdown.
+     */
+    const mouseDown = (event: MouseEvent) => {
+      if (performance.now() - lastTouchAtRef.current < 800) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest?.(UI)) { uiPress = true; return; }
+      if (!target?.closest?.('.combat-screen') && document.pointerLockElement === null) return;
+      if (event.button === 2) event.preventDefault();
+      const canvas = document.querySelector('.combat-screen .arena-canvas') as HTMLCanvasElement | null;
+      // Browsers may refuse pointer lock (e.g. just after Esc); the mouse still works unlocked.
+      if (canvas && document.pointerLockElement !== canvas) Promise.resolve(canvas.requestPointerLock?.()).catch(() => {});
+      unlockAudio();
+      const self = selfPlayer();
+      if (self && !self.alive) { cycleSpectate(event.button === 2 ? -1 : 1); return; }
+      if (event.button === 0) { primaryRef.current = true; primaryPulseUntilRef.current = performance.now() + 80; }
+      if (event.button === 2) { secondaryRef.current = true; secondaryPulseUntilRef.current = performance.now() + 80; }
+      sendControls();
+    };
+    /**
+     * Every mouse move also reports which buttons are held. If a press was
+     * swallowed (touchpads suppress clicks while keys are held), holding the
+     * button still fires; releasing it outside the window still stops.
+     */
+    const buttonsFromMove = (event: PointerEvent) => {
+      if (event.pointerType !== 'mouse' || uiPress) return;
+      const self = selfPlayer();
+      if (!self?.alive) return;
+      const left = (event.buttons & 1) !== 0;
+      const right = (event.buttons & 2) !== 0;
+      if (left !== primaryRef.current || right !== secondaryRef.current) {
+        primaryRef.current = left;
+        secondaryRef.current = right;
+        sendControls();
+      }
+    };
     const keydown = (event: KeyboardEvent) => {
       if ((event.target as HTMLElement | null)?.closest?.('input')) return;
-      const key = event.key.toLowerCase();
+      const key = keyName(event);
       if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) event.preventDefault();
       unlockAudio();
       if (key === 'm' && !event.repeat) { const next = !isMuted(); setMuted(next); setMutedState(next); return; }
@@ -533,7 +558,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       keysRef.current.add(key);
       sendControls();
     };
-    const keyup = (event: KeyboardEvent) => { keysRef.current.delete(event.key.toLowerCase()); sendControls(); };
+    const keyup = (event: KeyboardEvent) => { keysRef.current.delete(keyName(event)); keysRef.current.delete(event.key.toLowerCase()); sendControls(); };
     const release = () => {
       keysRef.current.clear(); primaryRef.current = false; secondaryRef.current = false;
       primaryPulseUntilRef.current = 0; secondaryPulseUntilRef.current = 0;
@@ -541,6 +566,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       sendControls();
     };
     const pointerUp = (event: MouseEvent) => {
+      uiPress = false;
       if (event.button === 0) primaryRef.current = false;
       if (event.button === 2) secondaryRef.current = false;
       sendControls();
@@ -552,11 +578,14 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     window.addEventListener('keyup', keyup);
     window.addEventListener('blur', release);
     window.addEventListener('mouseup', pointerUp);
+    window.addEventListener('mousedown', mouseDown, true);
+    window.addEventListener('pointermove', buttonsFromMove);
     document.addEventListener('pointerlockchange', pointerLockChange);
     const interval = window.setInterval(sendControls, 50);
     return () => {
       window.removeEventListener('keydown', keydown); window.removeEventListener('keyup', keyup); window.removeEventListener('blur', release);
       window.removeEventListener('mouseup', pointerUp); document.removeEventListener('pointerlockchange', pointerLockChange); window.clearInterval(interval);
+      window.removeEventListener('mousedown', mouseDown, true); window.removeEventListener('pointermove', buttonsFromMove);
       if (document.pointerLockElement) document.exitPointerLock();
     };
   }, [connected, sendControls, selfPlayer, requestStation, requestBarrier, cycleSpectate]);
@@ -704,7 +733,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
           <div className="launch-bottom"><span>SKYFORGE AEROSPACE COMBAT LEAGUE</span><span>ATTACK · DEFEND · SWITCH SIDES</span></div>
         </section>
       ) : (
-        <section className={`combat-screen ${isGunner ? 'role-ground' : 'role-pilot'}`} onPointerMove={handleCombatPointerMove} onMouseDown={handleCombatMouseDown} onTouchStart={() => { lastTouchAtRef.current = performance.now(); }} onContextMenu={(event) => event.preventDefault()}>
+        <section className={`combat-screen ${isGunner ? 'role-ground' : 'role-pilot'}`} onPointerMove={handleCombatPointerMove} onTouchStart={() => { lastTouchAtRef.current = performance.now(); }} onContextMenu={(event) => event.preventDefault()}>
           <ArenaView key={`${snapshot?.arenaId ?? 'preview'}:${offlineTraining ? 'training' : 'arena'}`} readState={readState} readSelfId={readSelfId} mode={offlineTraining ? 'training' : 'arena'} readAim={readAim} readViewId={readViewId} />
           <div className="combat-vignette" />
           <header className="combat-header">
@@ -822,7 +851,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
           </div>}
           <div className="control-legend">{isGunner
             ? <><span><kbd>MOUSE</kbd><kbd>WASD</kbd> AIM</span><span><kbd>LMB</kbd> AA CANNON</span><span><kbd>RMB</kbd> SAM (LOCK)</span><span><kbd>1</kbd>–<kbd>9</kbd><kbd>Q</kbd><kbd>E</kbd> MOVE</span><span><kbd>R</kbd> HOLD TO REPAIR (PAD)</span><span><kbd>F</kbd> SHIELD</span><span><kbd>M</kbd> SOUND</span></>
-            : <><span><kbd>MOUSE</kbd><kbd>↑</kbd><kbd>↓</kbd> PITCH</span><span><kbd>A</kbd><kbd>D</kbd> TURN</span><span><kbd>Q</kbd><kbd>E</kbd> ROLL</span><span><kbd>W</kbd><kbd>S</kbd> THROTTLE</span><span><kbd>SPACE</kbd> AFTERBURNER</span><span><kbd>SHIFT</kbd> AIR BRAKE</span><span><kbd>LMB</kbd> CANNON</span><span><kbd>RMB</kbd> MISSILE</span><span><kbd>M</kbd> SOUND</span></>}</div>
+            : <><span><kbd>MOUSE</kbd><kbd>↑</kbd><kbd>↓</kbd> PITCH</span><span><kbd>A</kbd><kbd>D</kbd> TURN</span><span><kbd>Q</kbd><kbd>E</kbd> ROLL</span><span><kbd>W</kbd><kbd>S</kbd> THROTTLE</span><span><kbd>SPACE</kbd> AFTERBURNER</span><span><kbd>SHIFT</kbd> AIR BRAKE</span><span><kbd>LMB</kbd><kbd>F</kbd> CANNON</span><span><kbd>RMB</kbd><kbd>R</kbd> MISSILE</span><span><kbd>M</kbd> SOUND</span></>}</div>
 
           <div className="touch-flight-controls">
             <div className="touch-stick"><button onPointerDown={(event) => capturePress(event, 'arrowup')} onPointerUp={() => setKey('arrowup', false)} onPointerCancel={() => setKey('arrowup', false)} aria-label={isGunner ? 'Raise gun' : 'Nose up'}>↑</button><button onPointerDown={(event) => capturePress(event, 'a')} onPointerUp={() => setKey('a', false)} onPointerCancel={() => setKey('a', false)}>←</button><button onPointerDown={(event) => capturePress(event, 'arrowdown')} onPointerUp={() => setKey('arrowdown', false)} onPointerCancel={() => setKey('arrowdown', false)} aria-label={isGunner ? 'Lower gun' : 'Nose down'}>↓</button><button onPointerDown={(event) => capturePress(event, 'd')} onPointerUp={() => setKey('d', false)} onPointerCancel={() => setKey('d', false)}>→</button><button onPointerDown={(event) => capturePress(event, 'q')} onPointerUp={() => setKey('q', false)} onPointerCancel={() => setKey('q', false)}>↶</button><button onPointerDown={(event) => capturePress(event, 'e')} onPointerUp={() => setKey('e', false)} onPointerCancel={() => setKey('e', false)}>↷</button></div>

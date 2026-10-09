@@ -347,6 +347,38 @@ function towerAimPoint(tower: TowerState) {
   return { x: tower.x, y: towerHeight(tower) * .62, z: tower.z };
 }
 function towerHeight(tower: TowerState) { return tower.hp > 0 ? TOWER.height : TOWER.height * .22; }
+
+/**
+ * The tower's real outline, bottom to top, in ARENA_SCALE units matching the
+ * model in defences.ts: plinth, finned shaft, deck collar, then mast, crown
+ * and dish. Hits land anywhere on it, not just on one thin cylinder.
+ */
+const TOWER_PROFILE: [top: number, radius: number][] = [[6, 27], [46, 17], [50.5, 19.5], [86, 11]];
+/** A destroyed tower leaves a stump: the plinth and the lower shaft. */
+const STUMP_TOP = 19.5;
+
+function towerRadiusAt(tower: TowerState, y: number) {
+  const level = y / ARENA_SCALE;
+  if (level < 0) return 0;
+  if (tower.hp <= 0) return level > STUMP_TOP ? 0 : (level <= 6 ? 27 : 17) * ARENA_SCALE;
+  for (const [top, radius] of TOWER_PROFILE) if (level <= top) return radius * ARENA_SCALE;
+  return 0;
+}
+
+/** The shield bubble around a protected tower (half-ellipsoid, as drawn in defences.ts). */
+const BUBBLE_RADIUS = 33;
+const BUBBLE_HEIGHT = 33 * 2.45;
+
+function insideTower(room: MatchRoom, tower: MatchTower, point: Point, now: number, withBubble: boolean) {
+  const dx = point.x - tower.x; const dz = point.z - tower.z;
+  const radius = towerRadiusAt(tower, point.y);
+  if (radius && dx * dx + dz * dz <= radius * radius) return true;
+  if (!withBubble || tower.hp <= 0 || point.y < 0) return false;
+  const shielded = (tower.kind !== 'shield' && standing(room, 'shield')) || tower.barrierUntil > now;
+  if (!shielded) return false;
+  const r = BUBBLE_RADIUS * ARENA_SCALE; const h = BUBBLE_HEIGHT * ARENA_SCALE;
+  return (dx * dx + dz * dz) / (r * r) + (point.y * point.y) / (h * h) <= 1;
+}
 function standing(room: MatchRoom, kind: TowerState['kind']) {
   return room.towers.some((tower) => tower.kind === kind && tower.hp > 0);
 }
@@ -502,7 +534,9 @@ function stepPilot(room: MatchRoom, jet: MatchPlayer, now: number, dt: number) {
   const { approachingBoundary, hitBoundary } = stepFlight(jet, jet.input, dt);
   // Towers are solid.
   for (const tower of room.towers) {
-    if (Math.hypot(jet.x - tower.x, jet.z - tower.z) < TOWER.radius + COMBAT.jetHitRadius * .4 && jet.y < towerHeight(tower)) {
+    // Jets crash into the structure itself (they fly through shield bubbles).
+    const radius = towerRadiusAt(tower, jet.y);
+    if (radius && Math.hypot(jet.x - tower.x, jet.z - tower.z) < radius + COMBAT.jetHitRadius * .4) {
       crash(room, jet, `THE ${tower.label} TOWER`);
       return;
     }
@@ -769,12 +803,21 @@ function hitSomething(room: MatchRoom, shot: MatchProjectile, previous: Point, n
     damagePlayer(room, target, shot.damage, shot.ownerId, shot.team);
     return true;
   }
+  // Towers: check along the whole path this tick (fast rounds cover a lot of
+  // ground per step) against the tower's full outline and any shield bubble.
+  // A hit on the bubble still damages the tower, reduced by the shield.
+  const steps = Math.max(2, Math.ceil(Math.hypot(shot.x - previous.x, shot.y - previous.y, shot.z - previous.z) / (2 * ARENA_SCALE)));
   for (const tower of room.towers) {
     if (tower.team === shot.team) continue;
-    const height = towerHeight(tower);
-    if (shot.y > height || Math.hypot(shot.x - tower.x, shot.z - tower.z) > TOWER.radius) continue;
-    damageTower(room, tower, shot.damage, shot.ownerId, shot.team, shot, now);
-    return true;
+    const near = BUBBLE_RADIUS * ARENA_SCALE + Math.hypot(shot.x - previous.x, shot.z - previous.z);
+    if (Math.abs(shot.x - tower.x) > near || Math.abs(shot.z - tower.z) > near) continue;
+    for (let step = 1; step <= steps; step += 1) {
+      const t = step / steps;
+      const point = { x: previous.x + (shot.x - previous.x) * t, y: previous.y + (shot.y - previous.y) * t, z: previous.z + (shot.z - previous.z) * t };
+      if (!insideTower(room, tower, point, now, true)) continue;
+      damageTower(room, tower, shot.damage, shot.ownerId, shot.team, point, now);
+      return true;
+    }
   }
   return false;
 }

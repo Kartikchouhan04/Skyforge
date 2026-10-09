@@ -91,12 +91,12 @@ export const GRAVITY = 22 * S;
  */
 export const JET_FLIGHT = {
   swift: {
-    stallSpeed: 52 * S, cornerSpeed: 160 * S, maxSpeed: 285 * S, boostSpeed: 60 * S, minSpeed: 52 * S,
-    thrust: 1.5, maxG: 9, minG: -3, rollRate: 4.4, maxBank: 1.36, rudderRate: .3,
+    stallSpeed: 52 * S, cornerSpeed: 160 * S, maxSpeed: 570 * S, boostSpeed: 300 * S, minSpeed: 52 * S,
+    thrust: 2.4, maxG: 9, minG: -3, rollRate: 4.4, maxBank: 1.36, rudderRate: .3,
   },
   bastion: {
-    stallSpeed: 56 * S, cornerSpeed: 150 * S, maxSpeed: 248 * S, boostSpeed: 70 * S, minSpeed: 56 * S,
-    thrust: 1.3, maxG: 7.5, minG: -3, rollRate: 3.3, maxBank: 1.3, rudderRate: .26,
+    stallSpeed: 56 * S, cornerSpeed: 150 * S, maxSpeed: 496 * S, boostSpeed: 320 * S, minSpeed: 56 * S,
+    thrust: 2.1, maxG: 7.5, minG: -3, rollRate: 3.3, maxBank: 1.3, rudderRate: .26,
   },
 } as const;
 
@@ -106,10 +106,10 @@ export const COMBAT = {
   muzzleOffset: 12 * S,
   cannonSpeed: 500 * S,
   /**
-   * Missile top speed after the motor burn: about Mach 3 (instruments use
+   * Missile top speed after the motor burn: about Mach 4.4 (instruments use
    * METERS_PER_UNIT = 0.42), against a jet's Mach 0.9–1.4.
    */
-  missileSpeed: 800 * S,
+  missileSpeed: 1_200 * S,
   /** Lock range on jets (about 1.8 km). */
   jetLockRange: 1_400 * S,
   /** Missiles can lock a tower or a ground unit from further out: they're big and don't move. */
@@ -118,12 +118,12 @@ export const COMBAT = {
   boundaryInset: 24 * A,
   projectileMargin: 30 * A,
   overspeedDrag: 38 * S,
-  spawnSpeed: 150 * S,
+  spawnSpeed: 300 * S,
   cannonDamage: 13,
   /** Cannon dispersion (radians either side) and the missile motor's acceleration. */
   cannonSpread: .0035,
-  /** Motor thrust: about 30 g, so full speed comes roughly 2.5 s after ignition. */
-  missileAccel: 300 * S,
+  /** Motor thrust: about 45 g, so full speed still comes roughly 2.5 s after ignition. */
+  missileAccel: 450 * S,
   /** Guidance: proportional-navigation constant, turn limit in g, seeker field of view (half-angle, radians). */
   missileNavigation: 4,
   missileMaxG: 45,
@@ -184,7 +184,7 @@ export const GROUND = {
   flakFuse: 2.2,
   flakSpread: .01,
   /** Interceptor missile (SAM): radar-guided, limited per round. */
-  samSpeed: 880 * S,
+  samSpeed: 1_320 * S,
   samDamage: 60,
   samCooldown: 6,
   samLockRange: 1_500 * S,

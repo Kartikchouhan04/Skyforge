@@ -24,7 +24,7 @@ Skyforge Stadium is a competitive, objective-based 5v5 aerial combat game for de
 
 ### The three towers
 
-Each tower has 1,000 HP and its own health bar, and damage lasts for the whole round. A destroyed tower stays down until the next round, and repairs can't bring it back.
+Each tower has 1,000 HP and its own health bar, and damage lasts for the whole round. Hits count anywhere on the structure, from plinth to crown. On a shielded tower, hits on the energy bubble count as well, reduced by the shield. A destroyed tower stays down until the next round, and repairs can't bring it back.
 
 | Tower | While it stands | When it falls |
 |---|---|---|
@@ -80,7 +80,7 @@ All of these are starting playtest values, not final balance. They live in `TOWE
 
 - **Weapons:**
   - **Cannon.** Rounds leave with slight dispersion and drop under gravity. They show as glowing tracers with a muzzle flash.
-  - **Missiles.** Missiles drop from alternating wing pylons, then the motor lights at about 30 g and accelerates them to roughly **Mach 3** (interceptors slightly faster), leaving a flame and smoke trail.
+  - **Missiles.** Missiles drop from alternating wing pylons, then the motor lights at about 45 g and accelerates them to roughly **Mach 4.4** (interceptors slightly faster), leaving a flame and smoke trail.
     - With a lock (up to about 1.8 km on jets) they home by **proportional navigation**, limited to 45 g.
     - Break hard enough to leave the seeker's field of view (about 50°) and the missile loses you and flies straight on.
     - Without a lock they fly straight.
@@ -186,7 +186,7 @@ Open [http://localhost:3000](http://localhost:3000), enter a callsign, pick a de
 - **Q / E** to roll by hand, for aerobatics such as barrel rolls, inverted flight and the split-S.
 - **W / S** to advance or retard the throttle lever (it stays where you leave it).
 - **Space** for afterburner, **Shift** for air brake.
-- **Left mouse** fires the cannon. **Right mouse** launches a missile, and works while the cannon is firing. With a lock (MISSILE LOCK on the HUD) the missile guides onto that jet, ground unit or tower. Without one it flies dead straight. 5-second reload.
+- **Left mouse** or **F** (hold) fires the cannon. **Right mouse** or **R** launches a missile, and works while the cannon is firing. The keys matter on laptops: Windows ignores touchpad clicks while other keys are held. With a lock (MISSILE LOCK on the HUD) the missile guides onto that jet, ground unit or tower. Without one it flies dead straight. 5-second reload.
 
 **Ground crews**
 

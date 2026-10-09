@@ -1021,7 +1021,8 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
           if (tower.hp <= 0) continue;
           const health = Math.ceil(tower.hp / tower.maxHp * 100);
           const locked = self?.targetId === `tower:${tower.id}`;
-          placeMarker(tower.id, tower.x, TOWER.height + 8 * ARENA_SCALE, tower.z, `${tower.label} ${health}%`, `${tower.shielded ? 'SHIELDED' : ''}${tower.barrier > 0 ? ' · BARRIER' : ''}`,
+          // Marked at mid-height: the whole tower is the target, not its top.
+          placeMarker(tower.id, tower.x, TOWER.height * .55, tower.z, `${tower.label} ${health}%`, `${tower.shielded ? 'SHIELDED' : ''}${tower.barrier > 0 ? ' · BARRIER' : ''}`,
             `tower ${tower.team === myTeam ? 'friend' : 'enemy'} ${tower.team} ${health < TOWER.critical * 100 ? 'critical' : ''} ${locked ? 'locked' : ''}`, width, height);
         }
         for (const shot of snapshot.projectiles) {
