@@ -1,0 +1,70 @@
+.training-button{height:38px;margin-top:8px;padding:0 12px 0 15px;border:1px solid rgba(101,223,255,.32);background:rgba(8,20,30,.72);color:#b8d7e1;display:flex;align-items:center;justify-content:space-between;font:600 11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.05em;cursor:pointer;transition:background .18s,border-color .18s,color .18s}
+.airframe-select{margin:12px 0 2px}.airframe-select>span{display:block;margin:0 0 6px;color:#a7b4bd;font:11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.06em}.airframe-select>div{display:grid;grid-template-columns:1fr 1fr;gap:6px}.hangar-card .airframe-select button{height:43px;padding:5px 7px;border:1px solid rgba(196,218,232,.16);background:rgba(4,9,15,.62);color:#91a2af;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:3px;cursor:pointer;text-align:left}.hangar-card .airframe-select button.selected{border-color:rgba(101,223,255,.72);background:rgba(43,132,157,.18);color:#eaf9ff;box-shadow:inset 0 0 0 1px rgba(101,223,255,.12)}.airframe-select button b{font:600 11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.06em}.airframe-select button small{font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;color:#7f93a1;letter-spacing: 0.04em}.airframe-select button.selected small{color:#7bd9ef}
+.combat-screen .arena-view{touch-action:none;cursor:crosshair}
+.stadium-pulse-light,.stadium-pulse-lights circle{animation:stadium-beacon-pulse 1.8s ease-in-out infinite alternate}
+.stadium-pulse-light:nth-child(2n),.stadium-pulse-lights circle:nth-child(2n){animation-delay:.7s}
+@keyframes stadium-beacon-pulse{from{opacity:.32}to{opacity:1}}
+@media(prefers-reduced-motion:reduce){.stadium-pulse-light,.stadium-pulse-lights circle{animation:none;opacity:.75}}
+.arena-view-state{position:absolute;z-index:9;left:50%;top:50%;transform:translate(-50%,-50%);max-width:min(440px,90vw);padding:11px 15px;border:1px solid rgba(101,223,255,.35);background:rgba(5,16,25,.8);color:#d7f7ff;text-align:center;font:700 12px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.065em;pointer-events:none}
+.arena-view-error{border-color:rgba(255,119,95,.6);color:#ffd0c5}
+.training-camera-hint{position:absolute;z-index:2;top:137px;left:50%;transform:translateX(-50%);padding:6px 10px;background:rgba(7,14,22,.55);color:#c7e6ef;font:700 11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.06em;white-space:nowrap;pointer-events:none}
+.training-camera-hint i{color:var(--cyan);font-style:normal;padding:0 4px}
+.control-legend{width:min(1120px,96vw);gap:7px;justify-content:center;flex-wrap:wrap;white-space:normal}
+.training-button:hover{border-color:var(--cyan);background:rgba(34,72,87,.42);color:#f0fbff}
+.training-button b{font:17px 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif;color:var(--cyan)}
+.hangar-card .quick-flight-button{width:100%;height:38px;margin-top:7px;padding:0 12px 0 15px;border:1px solid var(--cyan);background:rgba(101,223,255,.13);color:#d9f8ff;display:flex;align-items:center;justify-content:space-between;text-decoration:none;font:600 11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.05em;cursor:pointer;transition:background .18s,border-color .18s,color .18s}
+.hangar-card .quick-flight-button:hover{background:rgba(101,223,255,.24);color:#fff}
+.hangar-card .quick-flight-button b{font:17px 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif;color:var(--cyan)}
+.training-pill{color:var(--cyan)}
+.training-status{color:var(--cyan);font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.04em}
+.training-score .score-team{min-width:105px}
+.training-score .round-readout b{font-size: 11px;letter-spacing: 0.04em}
+.training-score .score-team.ember-text b{color:var(--orange)}
+@media(max-width:760px){.training-button{height:34px;margin-top:7px;font-size: 10px}.hangar-card .quick-flight-button{height:34px;margin-top:6px;font-size: 10px}.training-status{display:none}.training-score{gap:5px}.training-score .score-team{min-width:0;gap:4px}.training-score .score-team span{font-size: 10px}.training-score .score-team b{font-size: 16px}.training-score .round-readout{min-width:42px}.training-actions{gap:4px}.training-actions button{padding:0 5px;font-size: 10px}}
+
+.arena-picker-backdrop{position:fixed;inset:0;z-index:30;display:grid;place-items:center;width:100vw;height:100vh;padding:22px;background:rgba(3,9,16,.78);backdrop-filter:blur(12px)}
+.arena-picker{width:min(1040px,100%);max-height:calc(100svh - 44px);overflow:auto;padding:25px 28px 20px;position:relative;border:1px solid rgba(170,220,239,.25);background:linear-gradient(145deg,rgba(15,30,43,.98),rgba(7,15,25,.99));box-shadow:0 28px 100px rgba(0,0,0,.55)}
+.arena-picker-top,.arena-picker-footer{display:flex;align-items:center;justify-content:space-between;gap:14px;color:#8da5b3;font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.07em}
+.arena-picker-top b{margin-left:10px;color:#55d9ff;font-weight:400}
+.arena-picker-top>button{width:30px;height:30px;border:1px solid rgba(202,226,240,.18);background:rgba(255,255,255,.035);color:#c6d8e2;font:21px 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif;cursor:pointer}
+.arena-picker-heading{margin:16px 0 20px}
+.arena-picker-heading>span{color:#55d9ff;font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.095em}
+.arena-picker-heading h2{margin:6px 0 4px;color:#eff8fb;font:700 clamp(27px,4vw,40px) 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.04em}
+.arena-picker-heading p{margin:0;color:#91a4b0;font:11px 'Barlow', 'Segoe UI', system-ui, sans-serif;line-height:1.6}
+.arena-launch-error{margin:-10px 0 14px;color:#ff9a83;font:11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.05em}
+.arena-options{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
+.arena-option{position:relative;display:block;min-width:0;padding:8px;text-align:left;border:1px solid rgba(169,203,221,.17);background:rgba(255,255,255,.025);color:#e8f1f5;cursor:pointer;transition:border-color .18s,background .18s,transform .18s}
+.arena-option input{position:absolute;z-index:1;right:14px;top:14px;width:16px;height:16px;margin:0;accent-color:var(--arena-accent,#55d9ff);cursor:pointer}
+.arena-option:has(input:checked){border-color:var(--arena-accent,#55d9ff);background:rgba(80,169,197,.08);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--arena-accent,#55d9ff) 25%,transparent)}
+.arena-option:has(input:checked) .selected-label{display:inline}.arena-option:has(input:checked) .unselected-label{display:none}.arena-option:not(:has(input:checked)) .selected-label{display:none}.arena-option:not(:has(input:checked)) .unselected-label{display:inline}
+.arena-option:hover{transform:translateY(-2px);border-color:rgba(153,219,241,.5)}
+.arena-option.selected{border-color:var(--arena-accent,#55d9ff);background:rgba(80,169,197,.08);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--arena-accent,#55d9ff) 25%,transparent)}
+.arena-option.theme-skyforge{--arena-accent:#55d9ff}.arena-option.theme-red-mesa{--arena-accent:#ff875f}.arena-option.theme-ice-fjord{--arena-accent:#8ce8ff}
+.arena-option:focus-visible,.arena-picker button:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+.arena-preview{height:145px;display:block;position:relative;overflow:hidden;border:1px solid rgba(222,244,255,.12);background:#172c3b}
+.preview-skyforge{--arena-accent:#55d9ff;background:linear-gradient(180deg,#6da8bf 0%,#90c7d5 58%,#3c5965 59%,#192b35 100%)}
+.preview-red-mesa{--arena-accent:#ff875f;background:linear-gradient(180deg,#d78b5d 0%,#f1b179 62%,#8c4936 63%,#3f2a2b 100%)}
+.preview-ice-fjord{--arena-accent:#8ce8ff;background:linear-gradient(180deg,#a3d5e9 0%,#c6ebf2 62%,#4b839d 63%,#1e455e 100%)}
+.preview-grid{position:absolute;inset:58% -20% -30%;background-image:linear-gradient(rgba(224,248,255,.23) 1px,transparent 1px),linear-gradient(90deg,rgba(224,248,255,.23) 1px,transparent 1px);background-size:20px 16px;transform:perspective(100px) rotateX(14deg)}
+.preview-grid:after{content:"";position:absolute;left:22%;top:-48%;width:56%;height:82%;border:2px solid rgba(219,248,255,.68);border-bottom:0;border-radius:50% 50% 0 0}
+.preview-shape{position:absolute;display:block;bottom:32%;width:34%;height:36%;background:rgba(24,48,62,.88);clip-path:polygon(0 100%,22% 25%,35% 62%,55% 0,78% 55%,100% 100%)}
+.preview-shape-one{left:-5%}.preview-shape-two{right:-6%;transform:scaleX(-1)}
+.preview-red-mesa .preview-shape{bottom:31%;width:46%;height:51%;background:#8a4434;clip-path:polygon(0 100%,0 39%,18% 39%,18% 18%,52% 18%,52% 0,80% 0,80% 35%,100% 35%,100% 100%)}
+.preview-red-mesa .preview-shape-two{height:39%;background:#b65d3c}
+.preview-ice-fjord .preview-shape{bottom:32%;width:35%;height:45%;background:#508ba5;clip-path:polygon(0 100%,12% 45%,31% 75%,53% 0,72% 62%,100% 100%)}
+.preview-ice-fjord .preview-shape-two{height:58%;background:#74b3c9}
+.arena-preview>b{position:absolute;right:8px;top:8px;padding:5px 6px;background:rgba(4,12,20,.62);color:#e5f6fb;font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.045em}
+.arena-option-copy{display:flex;flex-direction:column;gap:6px;padding:12px 4px 8px}
+.arena-option-copy strong{font:700 19px 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.04em}
+.arena-option-copy small{min-height:30px;color:#91a4b0;font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;line-height:1.6}
+.arena-selected-mark{display:block;padding:7px 4px 3px;border-top:1px solid rgba(184,219,234,.1);color:#8da5b3;font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.055em}.arena-selected-mark b{font:inherit}
+.arena-option.selected .arena-selected-mark{color:var(--arena-accent,#55d9ff)}
+.arena-picker-footer{margin-top:18px;padding-top:15px;border-top:1px solid rgba(184,219,234,.12)}
+.arena-picker-footer>span i{color:#55d9ff;font-style:normal;padding:0 4px}
+.arena-launch-button{min-height:39px;padding:0 14px;border:1px solid #55d9ff;background:rgba(45,162,198,.12);color:#e9faff;font:600 10px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.05em;cursor:pointer}
+.arena-launch-button:hover{background:#1f8ca9}
+.arena-launch-button b{padding-left:16px;color:#7be8ff;font:17px 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif}
+@media(max-width:760px){.arena-picker-backdrop{padding:10px}.arena-picker{max-height:calc(100svh - 20px);padding:17px 15px 14px}.arena-picker-heading{margin:12px 0}.arena-options{grid-template-columns:1fr;gap:7px}.arena-option{display:grid;grid-template-columns:110px 1fr;grid-template-rows:auto 22px;align-items:center;gap:0 10px;padding:6px}.arena-preview{height:75px;grid-column:1;grid-row:1/3}.arena-option-copy{grid-column:2;grid-row:1;padding:4px 1px;gap:3px}.arena-option-copy strong{font-size: 15px}.arena-option-copy small{min-height:0;font-size: 10px}.arena-selected-mark{grid-column:2;grid-row:2;padding:4px 1px 0}.arena-picker-footer{align-items:flex-start;flex-direction:column;font-size: 10px}.arena-launch-button{width:100%;min-height:36px}}
+
+/* The interactive stadium is rendered directly into this WebGL surface. */
+.arena-view .arena-canvas{position:absolute;inset:0;z-index:1}

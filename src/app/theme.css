@@ -1,0 +1,111 @@
+:root {
+  color-scheme: light;
+  --night: #9bdff3;
+  --panel: #f0fbff;
+  --paper: #15384d;
+  --muted: #41677b;
+  --cyan: #35bce9;
+  --orange: #ed334b;
+  --lime: #ff4055;
+  --line: rgba(18, 63, 88, .2);
+  font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif;
+}
+
+body, button, input, select, textarea { font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif; }
+
+body {
+  background: linear-gradient(135deg, #b9edfa 0%, #7acde9 55%, #dff7ff 100%);
+  color: #15384d;
+  font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif;
+}
+
+.command-shell { background: var(--night); }
+.launch-screen { background: linear-gradient(135deg, #b5eaf8 0%, #7fcfea 62%, #a2def0 100%); }
+.arena-view { background: radial-gradient(ellipse at 50% 35%, #a6e4f7 0, #68bfdf 58%, #3b91b8 100%); }
+.launch-shade {
+  background: linear-gradient(90deg, #b7eafa 0%, rgba(178, 233, 248, .97) 24%, rgba(134, 211, 237, .71) 54%, rgba(103, 189, 222, .48) 100%),
+    linear-gradient(0deg, #83d0ec 0%, transparent 35%, rgba(242, 252, 255, .25) 100%);
+}
+.launch-header { border-color: rgba(20, 62, 85, .23); }
+.jet-brand { color: #17384d; }
+.launch-status, .guide-link { color: #315c72; font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif; font-weight: 700; }
+.launch-status i, .status-dot { background: var(--orange); box-shadow: 0 0 9px rgba(237, 51, 75, .55); }
+.launch-status b { color: #53768a; }
+.guide-link { color: #17384d; }
+.launch-copy h1 { color: #14374e; }
+.launch-copy h1 em { color: #e52d46; text-shadow: 0 0 24px rgba(229, 45, 70, .17); }
+.eyeline { color: #315c72; font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif; font-weight: 700; }
+.eyeline span { color: #087fa9; }
+.eyeline i { background: #548ba2; }
+.launch-copy > p { color: #274f65; }
+.match-specs { color: #315c72; font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif; font-weight: 700; }
+.match-specs b { color: #15384d; }
+.match-specs i, .launch-bottom i { background: var(--orange); }
+.hangar-card { border-color: rgba(237, 51, 75, .42); box-shadow: 0 28px 85px rgba(17, 58, 78, .28); }
+.card-top b, .guide-link span, .card-corner { color: var(--cyan); }
+.deploy-button { background: var(--orange); color: #fff8f8; }
+.deploy-button:hover { filter: brightness(1.08); }
+.training-button { border-color: rgba(76, 199, 234, .58); color: #d9f6ff; }
+.launch-bottom { border-color: rgba(20, 62, 85, .22); color: #315c72; font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif; font-weight: 700; }
+.hangar-manual { background: #a8e3f4; border-color: rgba(18, 63, 88, .2); }
+.manual-title > span, .hangar-manual article > span { color: #315c72; }
+.manual-title p, .hangar-manual article p { color: #355b70; }
+.hangar-manual article { border-color: rgba(18, 63, 88, .24); }
+.hangar-manual article > i { color: #e52d46; }
+.hangar-manual article h3 { color: #17384d; }
+.hangar-footer { background: #a8e3f4; color: #315c72; font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif; font-weight: 700; }
+.hangar-footer i { color: #e52d46; }
+.combat-screen { background: #75c9e7; }
+.azure-text { color: #43c4ec; }
+.ember-text { color: #f13950; }
+.phase-stamp span.phase-live { color: #ff5365; }
+.pilot-name em { color: #ff5365; }
+.base-chip.ember-chip > i em { background: #ed334b; }
+.combat-actions button:hover { border-color: #41c5eb; color: #59d4f3; }
+.series-overlay > span { color: #55cbed; }
+.series-overlay button { border-color: #55cbed; color: #55cbed; }
+.training-pill, .training-status { color: #67d7f4; }
+.webgl-toast { color: #ff6573; }
+.target-lock {
+  position: absolute;
+  z-index: 2;
+  top: calc(51% - 49px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 110px;
+  padding: 4px 9px;
+  border: 1px solid rgba(197, 223, 240, .17);
+  background: rgba(7, 13, 21, .7);
+  color: #98aeba;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  pointer-events: none;
+}
+.target-lock b { color: #d2e2e9; font-size: 12px; letter-spacing: 0.035em; }
+.target-lock.is-locked { border-color: rgba(239, 51, 75, .56); color: #ff7182; }
+.target-lock.is-locked b { color: #fff0f2; }
+.target-reticle.confirmed-hit { border-color: #ff4055; color: #ff4055; box-shadow: 0 0 15px rgba(255, 64, 85, .5); }
+.target-reticle.confirmed-hit span { color: #ff4055; font-size: 17px; }
+.touch-stick button:nth-child(5) { grid-column: 1; grid-row: 1; }
+.touch-stick button:nth-child(6) { grid-column: 3; grid-row: 1; }
+
+.jet-brand, .combat-brand, .launch-status, .guide-link, .eyeline,
+.match-specs, .hangar-card label, .connect-foot, .launch-bottom,
+.combat-actions button, .phase-stamp, .roster-heading, .pilot-row,
+.event-feed, .base-chip, .objective-note, .control-legend,
+.weapon-readout, .training-button, .training-status {
+  font-family: 'Barlow', 'Segoe UI', system-ui, sans-serif;
+  font-weight: 700;
+}
+.combat-screen .arena-view { background: radial-gradient(ellipse at 50% 35%, #a6e4f7 0, #68bfdf 58%, #3b91b8 100%); }
+
+@media (max-width: 760px) {
+  .launch-screen { background: linear-gradient(150deg, #b7edfa, #78cde9 70%, #a5e1f2); }
+  .launch-shade { background: linear-gradient(90deg, rgba(183, 234, 248, .96), rgba(131, 207, 233, .63)), linear-gradient(0deg, #83d0ec 0%, transparent 45%); }
+  .target-lock { top: calc(51% - 40px); min-width: 90px; padding: 3px 6px; font-size: 10px; }
+  .target-lock b { font-size: 11px; }
+}

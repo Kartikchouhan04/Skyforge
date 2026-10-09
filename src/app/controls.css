@@ -1,0 +1,26 @@
+.airframe-select{margin:12px 0 2px}
+.airframe-select>span{display:block;margin:0 0 6px;color:#a7b4bd;font:11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.06em}
+.airframe-select>div{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.hangar-card .airframe-select button{height:43px;padding:5px 7px;border:1px solid rgba(196,218,232,.16);background:rgba(4,9,15,.62);color:#91a2af;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:3px;cursor:pointer;text-align:left}
+.hangar-card .airframe-select button.selected{border-color:rgba(101,223,255,.72);background:rgba(43,132,157,.18);color:#eaf9ff;box-shadow:inset 0 0 0 1px rgba(101,223,255,.12)}
+.airframe-select button b{font:600 11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.06em}
+.airframe-select button small{font:10px 'Barlow', 'Segoe UI', system-ui, sans-serif;color:#7f93a1;letter-spacing: 0.04em}
+.airframe-select button.selected small{color:#7bd9ef}
+.combat-screen .arena-view{touch-action:none;cursor:crosshair}
+.combat-screen .combat-vignette,.combat-screen .phase-stamp,.combat-screen .team-panel,.combat-screen .target-lock,.combat-screen .target-reticle,.combat-screen .event-feed,.combat-screen .base-status-row,.combat-screen .flight-instruments,.combat-screen .control-legend,.combat-screen .spectator-note,.combat-screen .awaiting-card,.combat-screen .combat-banner{pointer-events:none}
+.control-legend{width:min(1120px,96vw);gap:7px;justify-content:center;flex-wrap:wrap;white-space:normal}
+@media(max-width:760px){.airframe-select{margin-top:8px}.airframe-select>div{gap:5px}.hangar-card .airframe-select button{height:38px}.airframe-select>span{margin-bottom:4px}.launch-copy{top:76px}.launch-copy h1{font-size: 68px;margin:10px 0 9px}.launch-copy>p{font-size: 11px}.match-specs{margin-top:10px}.control-legend{display:none}}
+@media(max-width:360px){.touch-triggers{gap:3px}.touch-triggers button{width:39px;height:42px;font-size: 10px}}
+.flight-instruments{align-items:center}
+.attitude-indicator{width:46px;height:46px;flex:none;margin-right:2px}
+.attitude-sky{fill:#2b6f95}
+.attitude-ground{fill:#5a3d26}
+.attitude-horizon{stroke:#eef7fb;stroke-width:1.4}
+.attitude-ladder{stroke:rgba(238,247,251,.75);stroke-width:1}
+.attitude-aircraft{fill:none;stroke:#ffd25e;stroke-width:3;stroke-linejoin:round}
+.attitude-pointer{fill:#ffd25e}
+.attitude-bezel{fill:none;stroke:rgba(193,220,237,.45);stroke-width:2}
+.instrument b.instrument-limit{color:#ffb44d}
+.flight-warning{align-self:center;padding:4px 7px;border:1px solid #ff6256;color:#ff8c80;font:700 11px 'Barlow', 'Segoe UI', system-ui, sans-serif;letter-spacing: 0.07em;animation:flight-warning-blink .5s steps(2,start) infinite}
+@keyframes flight-warning-blink{to{visibility:hidden}}
+@media(max-width:760px){.attitude-indicator{width:34px;height:34px}}
