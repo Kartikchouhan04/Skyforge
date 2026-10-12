@@ -92,7 +92,7 @@ All of these are starting playtest values, not final balance. They live in `TOWE
   - MISSILE INBOUND, with a fast beep, while a missile or SAM is homing on you. Incoming missiles are also marked on screen.
 - **Damage:** a damaged jet trails smoke, and below 30 HP it burns. A destroyed jet explodes.
 - **HUD markers:** teammates, detected enemies (with distance) and towers (with health) are labelled in team colours, and your current lock gets a bracket.
-- **Sound:** synthesised with WebAudio. **M** mutes it.
+- **Sound and music:** synthesised live with WebAudio, no audio files: weapon sounds, your engine (throttle, afterburner, wind, G buffet), a stadium crowd that cheers big moments, and an adaptive soundtrack that changes with the phase and builds when you are locked or a missile is inbound. **M** mutes everything, **N** toggles the music (also a MUSIC button in the hangar and match header). Both settings are remembered.
 - **Loadouts:** jets have no loadouts beyond the airframe choice until basic combat is balanced.
 
 Towers are solid: a jet that flies into one is destroyed.

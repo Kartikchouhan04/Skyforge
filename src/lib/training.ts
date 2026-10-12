@@ -1,19 +1,23 @@
-import { ARENA_SCALE, COMBAT, DEFAULT_ARENA_ID, TOWER, type ArenaId, type JetModel, type JetState, type PlayerInput, type Role, type RoomState } from '@/lib/protocol';
+import { ARENA_SCALE, COMBAT, DEFAULT_ARENA_ID, MAX_TEAM_SIZE, TOWER, type ArenaId, type JetModel, type JetState, type PlayerInput, type Role, type RolePreference, type RoomState } from '@/lib/protocol';
 import { noseOf, type FlightInput } from '@/lib/flight';
-import { addPlayer, createMatchRoom, deployPlayer, equip, layOutTowers, snapshotRoom, stepMatch, type MatchPlayer, type MatchRoom } from '@/lib/match';
+import { addBot, addPlayer, createMatchRoom, deployPlayer, equip, layOutTowers, snapshotRoom, stepMatch, type MatchPlayer, type MatchRoom } from '@/lib/match';
 import type { GroundLoadout } from '@/lib/protocol';
 
 /**
- * Offline training runs the real match rules (match.ts) in a practice room:
- * no rounds, no timer, drones respawn. Two drills:
+ * Offline training runs the real match rules (match.ts) in the browser.
+ * Two drills, in a practice room (no rounds, no timer, drones respawn):
  * - pilot: attack Red's three towers while target drones circle.
  * - ground: crew a Blue gun station while drones make passes over your towers.
+ * And a bot match: a full match (rounds, towers, side switch, Sudden Death)
+ * against and alongside the same bots that fill multiplayer rooms.
  */
 export type TrainingInput = PlayerInput;
 export type TrainingRole = Role;
 type DroneHome = { x: number; y: number; z: number; phase: number };
 
 export type TrainingSession = {
+  /** A practice drill with drones, or a full offline match with bots. */
+  kind: 'drill' | 'bots';
   room: MatchRoom;
   role: TrainingRole;
   state: RoomState;
@@ -54,7 +58,7 @@ export function createTrainingSession(callsign: string, arenaId: ArenaId = DEFAU
   layOutTowers(room, role === 'pilot' ? 'ember' : 'azure');
   const pilot = addPlayer(room, { id: TRAINING_PLAYER_ID, name: callsign.trim().slice(0, 16) || 'PILOT', model, team: 'azure' }, now);
   deployPlayer(room, pilot, role, 2, 2);
-  const session: TrainingSession = { room, role, state: snapshotRoom(room, now), droneHomes: new Map(), respawnAt: new Map(), startedAt: now };
+  const session: TrainingSession = { kind: 'drill', room, role, state: snapshotRoom(room, now), droneHomes: new Map(), respawnAt: new Map(), startedAt: now };
   for (let index = 0; index < DRONES; index += 1) {
     const drone = addPlayer(room, { id: `training-drone-${index + 1}`, name: `DRONE-${String(index + 1).padStart(2, '0')}`, model: index % 2 ? 'bastion' : 'swift', team: 'ember' }, now);
     session.droneHomes.set(drone.id, droneHome(index, role));
@@ -84,6 +88,24 @@ function droneAutopilot(drone: JetState, home: DroneHome, index: number, elapsed
   const targetAltitude = home.y + Math.sin(elapsed * .35 + home.phase) * 10 * ARENA_SCALE;
   const pitch = clamp((targetAltitude - drone.y) * .0025 - nose[1] * 2.2, -.55, .55);
   return { pitch, yaw: turn, roll: 0, throttle: 0, boost: false, airBrake: false };
+}
+
+/** Most bots on each side of an offline match: four teammates, five opponents (nine in all). */
+export const MAX_ALLY_BOTS = MAX_TEAM_SIZE - 1;
+export const MAX_ENEMY_BOTS = MAX_TEAM_SIZE;
+
+/**
+ * An offline match: you on Blue with `allies` bot teammates, against
+ * `enemies` bots on Red. It starts after the usual lobby wait, during which
+ * bots can still be added or removed.
+ */
+export function createBotMatchSession(callsign: string, arenaId: ArenaId = DEFAULT_ARENA_ID, model: JetModel = 'swift', allies = MAX_ALLY_BOTS, enemies = MAX_ENEMY_BOTS, preference: RolePreference = 'any'): TrainingSession {
+  const now = Date.now();
+  const room = createMatchRoom('OFFLINE', arenaId);
+  addPlayer(room, { id: TRAINING_PLAYER_ID, name: callsign.trim().slice(0, 16) || 'PILOT', model, team: 'azure', preference }, now);
+  for (let index = 0; index < Math.min(MAX_ALLY_BOTS, Math.max(0, allies)); index += 1) addBot(room, now, 'azure');
+  for (let index = 0; index < Math.min(MAX_ENEMY_BOTS, Math.max(1, enemies)); index += 1) addBot(room, now, 'ember');
+  return { kind: 'bots', room, role: 'pilot', state: snapshotRoom(room, now), droneHomes: new Map(), respawnAt: new Map(), startedAt: now };
 }
 
 /** Equipment can be swapped any time on the range. */
@@ -122,6 +144,12 @@ export function stepTraining(session: TrainingSession, controls: TrainingInput, 
   const elapsed = (now - session.startedAt) / 1_000;
   const pilot = room.players.get(TRAINING_PLAYER_ID);
   if (pilot) pilot.input = controls;
+  if (session.kind === 'bots') {
+    // A real match: the rules and the bots run it, with no respawns.
+    stepMatch(room, now, dt);
+    session.state = snapshotRoom(room, now);
+    return session.state;
+  }
   let index = 0;
   for (const drone of room.players.values()) {
     if (drone.id === TRAINING_PLAYER_ID) continue;

@@ -5,11 +5,13 @@ import { ArenaView } from '@/components/arena-view';
 import { AttitudeIndicator } from '@/components/attitude-indicator';
 import { RadarScope } from '@/components/radar-scope';
 import {
-  ARENA_CATALOG, DEFAULT_ARENA_ID, GROUND, GROUND_LOADOUTS, JET_CATALOG, TOWER, JET_FLIGHT, MAX_PLAYERS, MAX_ROUNDS, METERS_PER_UNIT, REGULATION_ROUNDS, ROUNDS_PER_HALF, TEAM_NAMES, TEAM_SHORT, TIEBREAKER_SECONDS, WINS_NEEDED,
-  type ArenaId, type CombatEvent, type GroundLoadout, type JetModel, type JetState, type PlayerInput, type Role, type RolePreference, type RoomState, type RoundRecord, type ServerMessage, type Team,
+  ARENA, ARENA_CATALOG, COMBAT, DEFAULT_ARENA_ID, GROUND, GROUND_LOADOUTS, JET_CATALOG, TOWER, JET_FLIGHT, MAX_PLAYERS, MAX_ROUNDS, MAX_TEAM_SIZE, METERS_PER_UNIT, REGULATION_ROUNDS, ROUNDS_PER_HALF, TEAM_NAMES, TEAM_SHORT, TIEBREAKER_SECONDS, WINS_NEEDED, matchPointTeams,
+  type ArenaId, type BotAction, type CombatEvent, type GroundLoadout, type JetModel, type JetState, type PlayerInput, type Role, type RolePreference, type RoomState, type RoundRecord, type ServerMessage, type ServerPerf, type Team,
 } from '@/lib/protocol';
-import { createTrainingSession, equipTraining, stepTraining, TRAINING_PLAYER_ID, type TrainingSession } from '@/lib/training';
-import { isMuted, setMuted, sfx, unlockAudio } from '@/lib/sfx';
+import { createBotMatchSession, createTrainingSession, equipTraining, MAX_ALLY_BOTS, MAX_ENEMY_BOTS, stepTraining, TRAINING_PLAYER_ID, type TrainingSession } from '@/lib/training';
+import { manageBots as manageRoomBots, setPreference as setRoomPreference } from '@/lib/match';
+import { crowdLevel, engine, isMusicOn, isMuted, setMusicOn, setMuted, sfx, unlockAudio } from '@/lib/sfx';
+import { setIntensity, setMood } from '@/lib/music';
 
 const TEAM_CLASS: Record<Team, string> = { azure: 'azure', ember: 'ember' };
 const ROLE_ICON: Record<Role, string> = { pilot: '✈', ground: '⌖' };
@@ -60,6 +62,16 @@ function defenderOf(round: number): Team | null {
   return round > REGULATION_ROUNDS ? null : round <= ROUNDS_PER_HALF ? 'azure' : 'ember';
 }
 
+/** One-word condition for your own jet or gun unit, beside the health bar. */
+function unitStatus(unit: JetState) {
+  if (unit.role === 'ground') return unit.transit > 0 ? 'DRIVING' : unit.repairProgress > 0 ? 'REPAIRING' : unit.hp < 30 ? 'CRITICAL' : unit.hp < 60 ? 'DAMAGED' : 'OPERATIONAL';
+  if (unit.hp < 30) return 'ON FIRE';
+  if (unit.gcas) return 'GCAS';
+  if (unit.stall) return 'STALL';
+  if (unit.hp < 60) return 'DAMAGED';
+  return unit.burner ? 'AFTERBURNER' : 'NOMINAL';
+}
+
 /** A simple match score for the results table. */
 function playerScore(player: JetState) {
   return Math.round(player.kills * 100 + player.damage + player.towerDamage * .5 + player.repaired * .5);
@@ -87,12 +99,22 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const [rolePreference, setRolePreference] = useState<RolePreference>('any');
   const [loadout, setLoadout] = useState<GroundLoadout>('balanced');
   const [muted, setMutedState] = useState(false);
+  const [musicOn, setMusicOnState] = useState(true);
   const [trainingRole, setTrainingRole] = useState<Role>(initialDrill);
+  // Offline bot match: picked in the training dialog, and whether one is running.
+  const [trainingKind, setTrainingKind] = useState<'drill' | 'bots'>('drill');
+  const [botAllies, setBotAllies] = useState(MAX_ALLY_BOTS);
+  const [botEnemies, setBotEnemies] = useState(MAX_ENEMY_BOTS);
+  const [offlineBots, setOfflineBots] = useState(false);
   const [hitMarker, setHitMarker] = useState(false);
   const [snapshot, setSnapshot] = useState<RoomState | null>(initialSession?.state ?? null);
   const [copied, setCopied] = useState(false);
   const [feed, setFeed] = useState<CombatEvent[]>([]);
+  const [killFeed, setKillFeed] = useState<CombatEvent[]>([]);
   const [banner, setBanner] = useState('');
+  // Performance overlay (` to toggle): frame rate, frame time, latency, server tick, client errors.
+  const [showPerf, setShowPerf] = useState(false);
+  const [perf, setPerf] = useState<{ fps: number; frameMs: number; worstMs: number; pingMs: number | null; server: ServerPerf | null; errors: number }>({ fps: 0, frameMs: 0, worstMs: 0, pingMs: null, server: null, errors: 0 });
   const socketRef = useRef<WebSocket | null>(null);
   const trainingRef = useRef<TrainingSession | null>(initialSession);
   const trainingModeRef = useRef(Boolean(initialSession));
@@ -118,6 +140,10 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   // While spectating: which surviving teammate the camera follows.
   const spectateIdRef = useRef<string | null>(null);
   const lastCountdownRef = useRef(-1);
+  // Your own lock at the last update, for the lock-ready tone.
+  const lockRef = useRef<string | null>(null);
+  // Your ground unit's last height and transit, for the lift and drive sounds.
+  const travelRef = useRef({ y: 0, transit: -1 });
   const lastControlsAtRef = useRef(0);
   const seenEventsRef = useRef(new Set<string>());
   const bannerTimerRef = useRef<number | undefined>(undefined);
@@ -125,6 +151,8 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const requestedTrainingRef = useRef(false);
 
   useEffect(() => {
+    setMutedState(isMuted());
+    setMusicOnState(isMusicOn());
     if (!initialTraining) setName(readPreference('jet-arena-callsign') ?? '');
     const savedArena = ARENA_CATALOG.find((arena) => arena.id === readPreference('jet-arena-selected-arena'))?.id;
     if (savedArena && !initialTraining) setSelectedArena(savedArena);
@@ -136,6 +164,8 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     if (savedLoadout && savedLoadout in GROUND_LOADOUTS) setLoadout(savedLoadout as GroundLoadout);
     const savedDrill = readPreference('skyforge-training-drill');
     if (!initialTraining && (savedDrill === 'pilot' || savedDrill === 'ground')) setTrainingRole(savedDrill);
+    const [savedAllies, savedEnemies] = (readPreference('skyforge-bot-counts') ?? '').split(',').map(Number);
+    if (Number.isInteger(savedAllies) && Number.isInteger(savedEnemies)) { setBotAllies(Math.max(0, Math.min(MAX_ALLY_BOTS, savedAllies))); setBotEnemies(Math.max(1, Math.min(MAX_ENEMY_BOTS, savedEnemies))); }
     if (initialTraining) {
       savePreference('jet-arena-callsign', initialCallsign);
       savePreference('jet-arena-selected-arena', initialArena);
@@ -204,6 +234,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   function chooseRolePreference(preference: RolePreference) {
     setRolePreference(preference);
     savePreference('skyforge-role-preference', preference);
+    if (trainingModeRef.current && trainingRef.current?.kind === 'bots') { setRoomPreference(trainingRef.current.room, TRAINING_PLAYER_ID, preference); return; }
     const socket = socketRef.current;
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'preference', role: preference }));
   }
@@ -217,9 +248,30 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'equip', ...choice }));
   }
 
+  /** Lobby: add or remove bots (the server keeps it to ten players, at least one of them a person). */
+  function manageBots(action: BotAction, team?: Team) {
+    sfx.click();
+    // Offline bot match: the room runs right here.
+    if (trainingModeRef.current && trainingRef.current?.kind === 'bots') {
+      manageRoomBots(trainingRef.current.room, action, Date.now(), team);
+      return;
+    }
+    const socket = socketRef.current;
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'bots', action, team }));
+  }
+
   function chooseTrainingRole(role: Role) {
     setTrainingRole(role);
+    setTrainingKind('drill');
     savePreference('skyforge-training-drill', role);
+  }
+
+  function chooseBotCounts(allies: number, enemies: number) {
+    const nextAllies = Math.max(0, Math.min(MAX_ALLY_BOTS, allies));
+    const nextEnemies = Math.max(1, Math.min(MAX_ENEMY_BOTS, enemies));
+    setBotAllies(nextAllies);
+    setBotEnemies(nextEnemies);
+    savePreference('skyforge-bot-counts', `${nextAllies},${nextEnemies}`);
   }
 
   /** Mouse stick deflection now, decaying back to centre with a ~0.18s time constant. */
@@ -299,24 +351,39 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     bannerTimerRef.current = window.setTimeout(() => setBanner(''), 3_800);
   }, []);
 
+  const toggleSound = useCallback(() => { const next = !isMuted(); setMuted(next); setMutedState(next); }, []);
+  const toggleMusic = useCallback(() => { const next = !isMusicOn(); setMusicOn(next); setMusicOnState(next); }, []);
+
   const handleEvents = useCallback((events: CombatEvent[]) => {
     const fresh: CombatEvent[] = [];
+    // The deciding round gets the match fanfare, not the round sting as well.
+    const matchOver = events.some((event) => event.type === 'match-end' && !seenEventsRef.current.has(event.id));
     for (const event of events) {
       if (seenEventsRef.current.has(event.id)) continue;
       seenEventsRef.current.add(event.id);
       fresh.push(event);
       const mine = event.ownerId === selfIdRef.current;
-      if (['round-start', 'round-end', 'match-end', 'tower-down', 'tower-critical', 'sides'].includes(event.type) || (event.type === 'zone' && !event.ownerId)) announce(event.text);
-      if (event.type === 'tower-down') { sfx.explosion(true); sfx.alarm(); }
+      if (['round-start', 'round-end', 'match-end', 'tower-down', 'tower-critical', 'sides', 'match-point'].includes(event.type) || (event.type === 'zone' && !event.ownerId)) announce(event.text);
+      const myTeam = selfPlayer()?.team;
+      const aimedAtMe = event.targetId === selfIdRef.current;
+      if (event.type === 'tower-down') { sfx.explosion(true); sfx.collapse(); sfx.alarm(); }
       else if (event.type === 'tower-critical') sfx.alarm();
       // Your tower under attack (the event's team is the attacker's).
-      else if (event.type === 'tower-hit' && event.team && selfPlayer()?.team !== event.team) sfx.alarm();
-      else if (event.type === 'jet-down') sfx.explosion(false);
+      else if (event.type === 'tower-hit' && event.team && myTeam !== event.team) sfx.alarm();
+      else if (event.type === 'jet-down') { if (mine) sfx.kill(); else if (aimedAtMe) sfx.eliminated(); else sfx.explosion(false); }
+      else if (event.type === 'jet-hit' && aimedAtMe) sfx.damaged();
+      else if (event.type === 'collapse' && mine) { sfx.thrownDown(); announce('YOUR PLATFORM COLLAPSED — YOU WERE THROWN TO THE GROUND'); }
       else if (event.type === 'repair') sfx.repairDone();
       else if (event.type === 'repair-interrupted' && mine) sfx.repairInterrupted();
       else if (event.type === 'barrier') sfx.shield();
-      else if (event.type === 'round-start') sfx.horn();
+      else if (event.type === 'round-start' || event.type === 'match-point') sfx.horn();
+      else if (event.type === 'round-end' && event.team && myTeam && !matchOver) sfx.roundResult(event.team === myTeam);
+      else if (event.type === 'match-end' && event.team && myTeam) sfx.matchResult(event.team === myTeam);
       else if (event.type === 'zone' && (!event.ownerId || mine)) sfx.alarm();
+      // The crowd reacts to the big moments.
+      if (event.type === 'tower-down' || event.type === 'round-end' || event.type === 'match-end') sfx.cheer(1);
+      else if (event.type === 'round-start') sfx.cheer(.7);
+      else if (event.type === 'jet-down') sfx.cheer(.5);
     }
     if (fresh.some((event) => event.ownerId === selfIdRef.current && event.type === 'jet-hit')) sfx.hit();
     if (fresh.some((event) => event.ownerId === selfIdRef.current && (event.type === 'jet-hit' || event.type === 'jet-down' || event.type === 'tower-hit' || event.type === 'tower-down'))) {
@@ -324,7 +391,10 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       if (hitTimerRef.current) window.clearTimeout(hitTimerRef.current);
       hitTimerRef.current = window.setTimeout(() => setHitMarker(false), 220);
     }
-    const feedEvents = fresh.filter((event) => event.type !== 'jet-hit' && !((event.type === 'boundary' || event.type === 'repair-interrupted' || event.type === 'zone') && event.ownerId && event.ownerId !== selfIdRef.current));
+    // Eliminations get their own kill feed; everything else goes to the event feed.
+    const kills = fresh.filter((event) => event.type === 'jet-down');
+    if (kills.length) setKillFeed((previous) => [...kills.reverse(), ...previous].slice(0, 5));
+    const feedEvents = fresh.filter((event) => event.type !== 'jet-hit' && event.type !== 'jet-down' && !((event.type === 'boundary' || event.type === 'repair-interrupted' || event.type === 'zone') && event.ownerId && event.ownerId !== selfIdRef.current));
     if (feedEvents.length) setFeed((previous) => [...feedEvents, ...previous].slice(0, 6));
   }, [announce, selfPlayer]);
 
@@ -339,16 +409,18 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     gunAimRef.current = { yaw: 0, pitch: .3, key: '' };
     seenEventsRef.current.clear();
     setFeed([]);
+    setKillFeed([]);
   }
 
-  function startTraining(arenaId: ArenaId = selectedArena, requestedCallsign = name.trim() || 'PILOT', model: JetModel = selectedModel, role: Role = trainingRole) {
+  /** Offline training: a drill (`role` picks attack or defence), or with `kind: 'bots'` a full match against bots. */
+  function startTraining(arenaId: ArenaId = selectedArena, requestedCallsign = name.trim() || 'PILOT', model: JetModel = selectedModel, role: Role = trainingRole, kind: 'drill' | 'bots' = 'drill') {
     const callsign = requestedCallsign;
     const pendingSocket = socketRef.current;
     socketRef.current = null;
     pendingSocket?.close();
     let session: TrainingSession;
     try {
-      session = createTrainingSession(callsign, arenaId, model, role);
+      session = kind === 'bots' ? createBotMatchSession(callsign, arenaId, model, botAllies, botEnemies, rolePreference) : createTrainingSession(callsign, arenaId, model, role);
     } catch (launchError) {
       console.error('Offline training session creation failed', launchError);
       setError('TRAINING FAILED TO LOAD — PLEASE TRY AGAIN.');
@@ -358,7 +430,8 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     setName(callsign);
     chooseArena(arenaId);
     chooseJetModel(model);
-    chooseTrainingRole(role);
+    if (kind === 'drill') chooseTrainingRole(role);
+    setOfflineBots(kind === 'bots');
     setShowArenaPicker(false);
     trainingRef.current = session;
     resetInputs();
@@ -371,11 +444,12 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     setError('');
     setConnection('OFFLINE TRAINING');
     try { window.history.replaceState(null, '', window.location.pathname); } catch { /* URL cleanup is optional for training. */ }
-    announce(role === 'ground' ? 'TOWER DEFENCE DRILL — CREW STATION 3' : 'ATTACK DRILL — DESTROY THE RED TOWERS');
+    announce(kind === 'bots' ? `BOT MATCH — ${session.room.players.size - 1} BOTS · STARTS SHORTLY` : role === 'ground' ? 'TOWER DEFENCE DRILL — CREW STATION 3' : 'ATTACK DRILL — DESTROY THE RED TOWERS');
   }
 
   function resetTraining() {
     if (!trainingModeRef.current) return;
+    if (trainingRef.current?.kind === 'bots') { startTraining(selectedArena, name.trim() || 'PILOT', selectedModel, trainingRole, 'bots'); return; }
     const session = createTrainingSession(name.trim() || 'PILOT', selectedArena, selectedModel, trainingRole);
     trainingRef.current = session;
     resetInputs();
@@ -386,14 +460,19 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
 
   function joinArena(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    connectToRoom(false);
+  }
+
+  /** Joins the room code entered (or a new private one), or with `quick`, lets the server matchmake into an open room. */
+  function connectToRoom(quick: boolean) {
     setError('');
     const callsign = name.trim();
-    const code = (roomCode.trim() || randomCode()).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
+    const code = quick ? '' : (roomCode.trim() || randomCode()).toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
     if (!callsign) { setError('Enter a callsign before takeoff.'); return; }
-    if (!code) { setError('Enter a room code.'); return; }
+    if (!code && !quick) { setError('Enter a room code.'); return; }
     savePreference('jet-arena-callsign', callsign);
-    setRoomCode(code);
-    setConnection('LINKING…');
+    if (!quick) setRoomCode(code);
+    setConnection(quick ? 'FINDING A MATCH…' : 'LINKING…');
     trainingModeRef.current = false;
     trainingRef.current = null;
     setOfflineTraining(false);
@@ -403,7 +482,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     const socket = new WebSocket(`${scheme}//${window.location.host}/api/game`);
     socketRef.current = socket;
     socket.addEventListener('open', () => {
-      if (socketRef.current === socket) socket.send(JSON.stringify({ type: 'join', room: code, name: callsign, arenaId: selectedArena, jetModel: selectedModel, role: rolePreference }));
+      if (socketRef.current === socket) socket.send(JSON.stringify({ type: 'join', room: code, name: callsign, arenaId: selectedArena, jetModel: selectedModel, role: rolePreference, quick }));
     });
     socket.addEventListener('message', (eventMessage) => {
       if (socketRef.current !== socket) return;
@@ -427,6 +506,9 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
         // Phase and round changes reach the HUD immediately.
         if (message.phase !== previous?.phase || message.round !== previous?.round || at - hudAtRef.current > 100) { hudAtRef.current = at; setSnapshot(message); }
         handleEvents(message.events);
+      } else if (message.type === 'pong') {
+        const pingMs = Math.max(0, performance.now() - message.t);
+        setPerf((previous) => ({ ...previous, pingMs, server: message.perf }));
       }
     });
     socket.addEventListener('error', () => {
@@ -523,6 +605,11 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       unlockAudio();
       const self = selfPlayer();
       if (self && !self.alive) { cycleSpectate(event.button === 2 ? -1 : 1); return; }
+      // Dry click: the trigger on an empty weapon.
+      if (self && snapshotRef.current?.phase === 'active') {
+        const dry = event.button === 2 ? (self.role === 'pilot' ? self.missileAmmo <= 0 : self.samAmmo <= 0) : event.button === 0 && self.role === 'ground' && self.flakAmmo <= 0;
+        if (dry) sfx.empty();
+      }
       if (event.button === 0) { primaryRef.current = true; primaryPulseUntilRef.current = performance.now() + 80; }
       if (event.button === 2) { secondaryRef.current = true; secondaryPulseUntilRef.current = performance.now() + 80; }
       sendControls();
@@ -549,7 +636,9 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       const key = keyName(event);
       if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) event.preventDefault();
       unlockAudio();
-      if (key === 'm' && !event.repeat) { const next = !isMuted(); setMuted(next); setMutedState(next); return; }
+      if (key === 'm' && !event.repeat) { toggleSound(); return; }
+      if (key === 'n' && !event.repeat) { toggleMusic(); return; }
+      if (key === '`' && !event.repeat) { setShowPerf((shown) => !shown); return; }
       const self = selfPlayer();
       if (self && !self.alive && !event.repeat && (key === 'q' || key === 'e' || key === '[' || key === ']')) { cycleSpectate(key === 'q' || key === '[' ? -1 : 1); return; }
       if (self?.role === 'ground' && self.alive && !event.repeat) {
@@ -558,6 +647,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
         if ((key === 'q' || key === 'e') && stations) { requestStation((self.station + (key === 'e' ? 1 : stations - 1)) % stations); return; }
         if (key === 'f') { requestBarrier(); return; }
       }
+      if (key === 'r' && !event.repeat && self?.alive && self.role === 'pilot' && self.missileAmmo <= 0 && snapshotRef.current?.phase === 'active') sfx.empty();
       keysRef.current.add(key);
       sendControls();
     };
@@ -591,7 +681,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       window.removeEventListener('mousedown', mouseDown, true); window.removeEventListener('pointermove', buttonsFromMove);
       if (document.pointerLockElement) document.exitPointerLock();
     };
-  }, [connected, sendControls, selfPlayer, requestStation, requestBarrier, cycleSpectate]);
+  }, [connected, sendControls, selfPlayer, requestStation, requestBarrier, cycleSpectate, toggleSound, toggleMusic]);
 
   useEffect(() => {
     if (!offlineTraining) return;
@@ -610,6 +700,57 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     return () => window.clearInterval(interval);
   }, [offlineTraining, handleEvents]);
 
+  /* --------------------------------------------------------- monitoring -- */
+  // Errors are always counted and, online, reported to the server log.
+  useEffect(() => {
+    const report = (message: string) => {
+      setPerf((previous) => ({ ...previous, errors: previous.errors + 1 }));
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'report', message: message.slice(0, 500) }));
+    };
+    const onError = (event: ErrorEvent) => report(`${event.message} @ ${event.filename}:${event.lineno}`);
+    const onRejection = (event: PromiseRejectionEvent) => report(`unhandled rejection: ${event.reason instanceof Error ? event.reason.message : String(event.reason)}`);
+    window.addEventListener('error', onError);
+    window.addEventListener('unhandledrejection', onRejection);
+    return () => { window.removeEventListener('error', onError); window.removeEventListener('unhandledrejection', onRejection); };
+  }, []);
+
+  // Latency (round trip) and server tick time, every two seconds while online.
+  useEffect(() => {
+    if (!connected || offlineTraining) return;
+    const ping = () => {
+      const socket = socketRef.current;
+      if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: 'ping', t: performance.now() }));
+    };
+    ping();
+    const interval = window.setInterval(ping, 2_000);
+    return () => window.clearInterval(interval);
+  }, [connected, offlineTraining]);
+
+  // Frame rate and frame time, measured only while the overlay is open.
+  useEffect(() => {
+    if (!showPerf) return;
+    let frame = 0;
+    let last = performance.now();
+    let windowStart = last;
+    let frames = 0;
+    let worst = 0;
+    const tick = (now: number) => {
+      const delta = now - last;
+      last = now;
+      frames += 1;
+      worst = Math.max(worst, delta);
+      if (now - windowStart >= 1_000) {
+        const elapsed = now - windowStart;
+        setPerf((previous) => ({ ...previous, fps: frames * 1_000 / elapsed, frameMs: elapsed / frames, worstMs: worst }));
+        windowStart = now; frames = 0; worst = 0;
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [showPerf]);
+
   useEffect(() => {
     if (!snapshot) return;
     const selfId = selfIdRef.current;
@@ -618,6 +759,16 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
       if (snapshot.projectiles.some((shot) => shot.targetId === selfId && (shot.kind === 'missile' || shot.kind === 'sam'))) sfx.missileWarning();
       else if (snapshot.players.some((player) => player.alive && player.team !== me.team && player.targetId === selfId)) sfx.lockWarning();
     }
+    // Your crew moving between stations: lift down, drive, lift up, then the clunk of setting up.
+    const travel = travelRef.current;
+    if (me?.alive && me.role === 'ground') {
+      if (me.transit > 0 && travel.transit >= 0) {
+        if (me.y < travel.y - 1) sfx.lift(false);
+        else if (me.y > travel.y + 1) sfx.lift(true);
+        else if (me.speed > 0) sfx.drive();
+      } else if (me.transit <= 0 && travel.transit > 0) sfx.setUp();
+      travelRef.current = { y: me.y, transit: me.transit };
+    } else travelRef.current = { y: 0, transit: -1 };
     if (snapshot.phase === 'countdown' && snapshot.phaseSecondsLeft !== lastCountdownRef.current) {
       lastCountdownRef.current = snapshot.phaseSecondsLeft;
       if (snapshot.phaseSecondsLeft > 0) sfx.countdown(snapshot.phaseSecondsLeft === 1);
@@ -629,7 +780,71 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
     } else spectateIdRef.current = null;
   }, [snapshot]);
 
+  /* ------------------------------------------------------------- audio -- */
+  // Any click or key, even in the hangar, starts audio (browsers need a gesture first).
+  useEffect(() => {
+    const unlock = () => unlockAudio();
+    window.addEventListener('pointerdown', unlock);
+    window.addEventListener('keydown', unlock);
+    return () => {
+      window.removeEventListener('pointerdown', unlock); window.removeEventListener('keydown', unlock);
+      setMood('off'); engine.update(null); crowdLevel(0);
+    };
+  }, []);
+
+  // The music, your engine and the crowd follow the game: its phase, how tense it is, and where you are.
+  useEffect(() => {
+    if (!connected || !snapshot) { setMood('hangar'); setIntensity(.3); engine.update(null); crowdLevel(0); lockRef.current = null; return; }
+    const selfId = selfIdRef.current;
+    const me = snapshot.players.find((player) => player.id === selfId);
+    const { phase } = snapshot;
+    const practice = snapshot.roundKind === 'practice';
+    const alive = me?.alive ?? false;
+    const missileInbound = alive && snapshot.projectiles.some((shot) => shot.targetId === selfId && (shot.kind === 'missile' || shot.kind === 'sam'));
+    const lockedOn = alive && snapshot.players.some((player) => player.alive && player.team !== me?.team && player.targetId === selfId);
+
+    if (phase === 'complete') {
+      setMood(snapshot.matchWinner && me && snapshot.matchWinner !== me.team ? 'defeat' : 'victory');
+    } else if (phase === 'active') {
+      setMood(snapshot.roundKind === 'tiebreaker' ? 'sudden' : 'combat');
+      let level = !alive ? .3 : practice ? .35 : .45;
+      if (lockedOn) level += .2;
+      if (missileInbound) level += .35;
+      if (alive && me && me.hp < 30) level += .1;
+      if (!practice) {
+        if (snapshot.secondsLeft <= 60) level += .15;
+        if (matchPointTeams(snapshot.roundWins).length) level += .1;
+        const standing = (team: Team) => snapshot.players.filter((player) => player.team === team && player.alive).length;
+        if (Math.min(standing('azure'), standing('ember')) <= 1) level += .15;
+      }
+      setIntensity(level);
+    } else if (phase === 'prep' || phase === 'countdown') {
+      setMood('prep');
+      setIntensity(phase === 'countdown' ? .8 : .3);
+    } else {
+      setMood('lobby');
+      setIntensity(phase === 'lobby' && snapshot.phaseSecondsLeft > 0 ? .5 : .2);
+    }
+
+    // Your engine, while you're in a jet.
+    if (alive && me?.role === 'pilot' && phase !== 'lobby' && phase !== 'complete') {
+      engine.update({ throttle: me.throttle, burner: me.burner, speed: me.speed / JET_FLIGHT[me.model].maxSpeed, g: me.gLoad, stall: me.stall });
+    } else engine.update(null);
+
+    // The crowd: louder in play, quieter the higher you climb out of the bowl.
+    const crowdBase = practice ? .35 : ({ lobby: .35, prep: .5, countdown: .65, active: .55, intermission: .5, complete: .8 } as const)[phase];
+    const altitude = alive && me ? Math.max(0, Math.min(1, me.y / (ARENA.maxAltitude * .6))) : .3;
+    crowdLevel(crowdBase * (1 - altitude * .75));
+
+    // A short rising tone when your own missile or SAM gets a lock.
+    const lock = alive && phase === 'active' && me && (me.role === 'pilot' ? me.missileAmmo : me.samAmmo) > 0 ? me.targetId : null;
+    if (lock && lock !== lockRef.current) sfx.lockReady();
+    lockRef.current = lock;
+  }, [connected, snapshot]);
+
   /* ------------------------------------------------------------ HUD data -- */
+  // A practice drill (drones, no rounds) has its own HUD; an offline bot match uses the match HUD.
+  const drill = offlineTraining && !offlineBots;
   const players = snapshot?.players ?? [];
   const self = players.find((player) => player.id === selfIdRef.current);
   const isGunner = self?.role === 'ground';
@@ -639,10 +854,22 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const zone = snapshot?.zone ?? null;
   const outsideZone = Boolean(zone && self?.alive && self.role === 'pilot' && phase === 'active' && Math.hypot(self.x - zone.x, self.z - zone.z) > zone.radius);
   const survivors = (team: Team) => players.filter((player) => player.team === team && player.alive).length;
+  const onMatchPoint = snapshot && !drill && !tiebreaker && phase !== 'complete' && phase !== 'lobby' ? matchPointTeams(snapshot.roundWins) : [];
+  /** One pip per squad member: lit while they are still in the round. */
+  const alivePips = (team: Team) => {
+    const squad = players.filter((player) => player.team === team);
+    if (!squad.length) return null;
+    const up = squad.filter((player) => player.alive).length;
+    return <small className="alive-pips" title={`${up} of ${squad.length} still in the round`} aria-label={`${up} of ${squad.length} alive`}>
+      {Array.from({ length: Math.max(squad.length, MAX_TEAM_SIZE) }, (_, index) => <i key={index} className={index < up ? 'up' : index < squad.length ? 'down' : 'empty'} />)}
+      <span>{up} LEFT</span>
+    </small>;
+  };
   const squadHealth = (team: Team) => Math.ceil(players.reduce((total, player) => total + (player.team === team && player.alive ? player.hp : 0), 0));
-  const mySide = !self || !snapshot ? '' : offlineTraining ? (snapshot.defender === self.team ? 'DEFENCE DRILL' : 'ATTACK DRILL')
+  const mySide = !self || !snapshot ? '' : drill ? (snapshot.defender === self.team ? 'DEFENCE DRILL' : 'ATTACK DRILL')
     : tiebreaker ? 'SUDDEN DEATH' : phase !== 'active' && phase !== 'prep' && phase !== 'countdown' ? '' : defender === self.team ? 'DEFENDING' : 'ATTACKING';
   const rosterCount = players.length;
+  const bots = players.filter((player) => player.bot).length;
   const teamPlayers = (team: Team) => players.filter((player) => player.team === team).sort((a, b) => Number(b.alive) - Number(a.alive) || (a.role === b.role ? 0 : a.role === 'pilot' ? -1 : 1) || b.kills - a.kills);
   const towers = snapshot?.towers ?? [];
   const stations = snapshot?.stations ?? [];
@@ -654,8 +881,8 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const spectating = self && !self.alive ? players.find((player) => player.id === spectateIdRef.current) : undefined;
   const preparing = phase === 'prep' || phase === 'countdown';
   const activeDrones = players.filter((player) => player.team === 'ember' && player.alive).length;
-  const phaseText = offlineTraining ? 'OFFLINE TRAINING' : phase === 'prep' ? `PREPARATION · ${snapshot?.phaseSecondsLeft}S` : phase === 'countdown' ? `WEAPONS FREE IN ${snapshot?.phaseSecondsLeft}` : phase === 'intermission' ? `NEXT ROUND IN ${snapshot?.phaseSecondsLeft}` : phase === 'lobby' ? (snapshot?.phaseSecondsLeft ? `MATCH STARTS IN ${snapshot.phaseSecondsLeft}` : 'WAITING FOR BOTH TEAMS') : phase === 'complete' ? 'MATCH COMPLETE' : tiebreaker ? 'SUDDEN DEATH' : 'LIVE';
-  const phaseClock = offlineTraining ? 'NO TIMER' : phase === 'active' || preparing ? clock(snapshot?.secondsLeft ?? 0) : phase === 'intermission' ? `00:${String(snapshot?.phaseSecondsLeft ?? 0).padStart(2, '0')}` : '--:--';
+  const phaseText = drill ? 'OFFLINE TRAINING' : phase === 'prep' ? `PREPARATION · ${snapshot?.phaseSecondsLeft}S` : phase === 'countdown' ? `WEAPONS FREE IN ${snapshot?.phaseSecondsLeft}` : phase === 'intermission' ? `NEXT ROUND IN ${snapshot?.phaseSecondsLeft}` : phase === 'lobby' ? (snapshot?.phaseSecondsLeft ? `MATCH STARTS IN ${snapshot.phaseSecondsLeft}` : 'WAITING FOR BOTH TEAMS') : phase === 'complete' ? 'MATCH COMPLETE' : tiebreaker ? 'SUDDEN DEATH' : 'LIVE';
+  const phaseClock = drill ? 'NO TIMER' : phase === 'active' || preparing ? clock(snapshot?.secondsLeft ?? 0) : phase === 'intermission' ? `00:${String(snapshot?.phaseSecondsLeft ?? 0).padStart(2, '0')}` : '--:--';
   const myStation = isGunner ? stations[self!.station] : undefined;
   const myTower = myStation ? towers.find((tower) => tower.id === myStation.towerId) : undefined;
   const radarContacts = self ? players.filter((player) => player.alive && player.team !== self.team && player.spotted && player.role === 'pilot').length : 0;
@@ -663,7 +890,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
   const nextRound = lastRound ? (lastRound.winner ? lastRound.round + 1 : lastRound.round) : 1;
   const nextOvertime = lastRound && !lastRound.winner ? lastRound.overtime + 1 : 0;
   const nextDefender = defenderOf(nextRound);
-  const objective = offlineTraining
+  const objective = drill
     ? (isGunner ? <>DEFENCE DRILL<br /><span>SHOOT THE DRONES · HOLD R AT A REPAIR PAD · F SHIELD</span></> : <>ATTACK DRILL<br /><span>TAKE OUT THE SHIELD TOWER FIRST</span></>)
     : tiebreaker ? <>SUDDEN DEATH · ALL JETS<br /><span>LAST SQUADRON FLYING WINS · STAY INSIDE THE ZONE</span></>
       : !self || !defender ? <>{WINS_NEEDED} ROUND WINS TAKE THE MATCH<br /><span>ROLES SWAP AFTER ROUND {ROUNDS_PER_HALF}</span></>
@@ -680,7 +907,10 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
           <header className="launch-header">
             <a className="jet-brand" href="/" aria-label="Skyforge Stadium home"><span className="brand-symbol">✣</span><span>SKYFORGE<span>//</span>STADIUM</span></a>
             <div className="launch-status"><i /> AEROSPACE COMBAT LEAGUE <b>S.01</b></div>
-            <a className="guide-link" href="#flight-manual">HOW IT WORKS <span>↘</span></a>
+            <div className="launch-links">
+              <button className="guide-link music-toggle" onClick={toggleMusic} aria-pressed={!musicOn} title="Music (N)">MUSIC <span>{musicOn ? 'ON' : 'OFF'}</span></button>
+              <a className="guide-link" href="#flight-manual">HOW IT WORKS <span>↘</span></a>
+            </div>
           </header>
           <div className="launch-copy">
             <div className="eyeline"><span>SKYFORGE STADIUM</span><i /> 5 VS 5</div>
@@ -705,7 +935,8 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
               </div>
               <label htmlFor="room-code">ROOM <span>OPTIONAL · SHARE TO SQUAD UP</span></label>
               <div className="room-entry"><input id="room-code" maxLength={8} value={roomCode} onChange={(event) => setRoomCode(event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, ''))} placeholder="GENERATE A ROOM" /><button type="button" onClick={() => setRoomCode(randomCode())} aria-label="Generate room code">⟳</button></div>
-              <button className="deploy-button" type="submit"><span>ENTER THE STADIUM</span><b>↗</b></button>
+              <button className="deploy-button" type="submit"><span>{roomCode ? `JOIN ROOM ${roomCode}` : 'OPEN A PRIVATE ROOM'}</span><b>↗</b></button>
+              <button className="deploy-button quick-match-button" type="button" onClick={() => connectToRoom(true)} title="Join an open public match, or start one others can join"><span>QUICK MATCH</span><b>⚡</b></button>
               <button className="training-button" type="button" aria-haspopup="dialog" aria-controls="arena-picker" aria-expanded={showArenaPicker} onClick={() => { setError(''); setShowArenaPicker(true); }}><span>ENTER OFFLINE TRAINING</span><b>↗</b></button>
               <a className="quick-flight-button" href={`/?mode=training&arena=${selectedArena}&model=${selectedModel}&role=${trainingRole}&pilot=${encodeURIComponent(name.trim() || 'PILOT')}`} onClick={(event) => { event.preventDefault(); startTraining(selectedArena, name.trim() || 'PILOT'); }}><span>QUICK {trainingRole === 'ground' ? 'DEFENCE' : 'ATTACK'} DRILL · {ARENA_CATALOG.find((arena) => arena.id === selectedArena)?.name.toUpperCase()}</span><b>↗</b></a>
               <div className="connect-foot"><span>◈ {ARENA_CATALOG.find((arena) => arena.id === selectedArena)?.name.toUpperCase()}</span><span>{connection}</span></div>
@@ -718,22 +949,28 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
               <div className="arena-picker-top"><span>OFFLINE TRAINING <b>02 / 03</b></span><button type="button" aria-label="Close arena selection" onClick={() => setShowArenaPicker(false)}>×</button></div>
               <div className="arena-picker-heading"><span>CHOOSE A DRILL, THEN AN ARENA</span><h2 id="arena-picker-title">TRAINING RANGE</h2><p>Click an arena to launch straight into the drill.</p></div>
               <div className="drill-select" role="group" aria-label="Training drill">
-                <button type="button" className={trainingRole === 'pilot' ? 'selected' : ''} aria-pressed={trainingRole === 'pilot'} onClick={() => chooseTrainingRole('pilot')}><b>✈ ATTACK DRILL</b><small>Fly a jet against Red’s three towers while target drones circle.</small></button>
-                <button type="button" className={trainingRole === 'ground' ? 'selected' : ''} aria-pressed={trainingRole === 'ground'} onClick={() => chooseTrainingRole('ground')}><b>⌖ DEFENCE DRILL</b><small>Crew a gun station at Blue’s towers and shoot down passing drones.</small></button>
+                <button type="button" className={trainingKind === 'drill' && trainingRole === 'pilot' ? 'selected' : ''} aria-pressed={trainingKind === 'drill' && trainingRole === 'pilot'} onClick={() => chooseTrainingRole('pilot')}><b>✈ ATTACK DRILL</b><small>Fly a jet against Red’s three towers while target drones circle.</small></button>
+                <button type="button" className={trainingKind === 'drill' && trainingRole === 'ground' ? 'selected' : ''} aria-pressed={trainingKind === 'drill' && trainingRole === 'ground'} onClick={() => chooseTrainingRole('ground')}><b>⌖ DEFENCE DRILL</b><small>Crew a gun station at Blue’s towers and shoot down passing drones.</small></button>
+                <button type="button" className={trainingKind === 'bots' ? 'selected' : ''} aria-pressed={trainingKind === 'bots'} onClick={() => setTrainingKind('bots')}><b>⚔ BOT MATCH</b><small>A full offline match with bot teammates and opponents: rounds, towers, side switch, Sudden Death.</small></button>
               </div>
+              {trainingKind === 'bots' && <div className="bot-count-select" role="group" aria-label="Number of bots">
+                <span className="azure-text">TEAMMATES <button type="button" aria-label="Fewer teammates" disabled={botAllies <= 0} onClick={() => chooseBotCounts(botAllies - 1, botEnemies)}>−</button><b>{botAllies}</b><button type="button" aria-label="More teammates" disabled={botAllies >= MAX_ALLY_BOTS} onClick={() => chooseBotCounts(botAllies + 1, botEnemies)}>+</button></span>
+                <span className="ember-text">OPPONENTS <button type="button" aria-label="Fewer opponents" disabled={botEnemies <= 1} onClick={() => chooseBotCounts(botAllies, botEnemies - 1)}>−</button><b>{botEnemies}</b><button type="button" aria-label="More opponents" disabled={botEnemies >= MAX_ENEMY_BOTS} onClick={() => chooseBotCounts(botAllies, botEnemies + 1)}>+</button></span>
+                <small>{botAllies + 1} V {botEnemies} · {botAllies + botEnemies} BOTS</small>
+              </div>}
               {error && <p className="arena-launch-error" role="alert">{error}</p>}
-              <form className="arena-selection-form" onSubmit={(event) => { event.preventDefault(); startTraining(selectedArena, name.trim() || 'PILOT'); }}>
+              <form className="arena-selection-form" onSubmit={(event) => { event.preventDefault(); startTraining(selectedArena, name.trim() || 'PILOT', selectedModel, trainingRole, trainingKind); }}>
                 <input type="hidden" name="mode" value="training" />
                 <input type="hidden" name="pilot" value={name.trim()} />
                 <input type="hidden" name="model" value={selectedModel} />
                 <input type="hidden" name="role" value={trainingRole} />
                 <div className="arena-options">{ARENA_CATALOG.map((arena) => <label key={arena.id} className={`arena-option theme-${arena.id} ${selectedArena === arena.id ? 'selected' : ''}`}>
-                  <input type="radio" name="arena" value={arena.id} checked={selectedArena === arena.id} onChange={() => chooseArena(arena.id)} onClick={() => startTraining(arena.id, name.trim() || 'PILOT')} />
+                  <input type="radio" name="arena" value={arena.id} checked={selectedArena === arena.id} onChange={() => chooseArena(arena.id)} onClick={() => startTraining(arena.id, name.trim() || 'PILOT', selectedModel, trainingRole, trainingKind)} />
                   <span className={`arena-preview preview-${arena.id}`}><i className="preview-grid" /><i className="preview-shape preview-shape-one" /><i className="preview-shape preview-shape-two" /><b>{arena.sector}</b></span>
                   <span className="arena-option-copy"><strong>{arena.name}</strong><small>{arena.description}</small></span>
                   <span className="arena-selected-mark"><b className="selected-label">● SELECTED</b><b className="unselected-label">○ CLICK TO FLY</b></span>
                 </label>)}</div>
-                <div className="arena-picker-footer"><span>LOCAL TRAINING <i>·</i> ARENA CARD LAUNCHES IMMEDIATELY</span><button type="submit" className="arena-launch-button">START {trainingRole === 'ground' ? 'DEFENCE' : 'ATTACK'} DRILL <b>↗</b></button></div>
+                <div className="arena-picker-footer"><span>LOCAL TRAINING <i>·</i> ARENA CARD LAUNCHES IMMEDIATELY</span><button type="submit" className="arena-launch-button">{trainingKind === 'bots' ? `START BOT MATCH · ${botAllies + 1}V${botEnemies}` : `START ${trainingRole === 'ground' ? 'DEFENCE' : 'ATTACK'} DRILL`} <b>↗</b></button></div>
               </form>
             </section>
           </div>}
@@ -745,35 +982,56 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
           <div className="combat-vignette" />
           <header className="combat-header">
             <div className="combat-brand">{brand} <i className={`live-pill ${offlineTraining ? 'training-pill' : ''}`}>{offlineTraining ? '● OFFLINE' : '● LIVE'}</i></div>
-            <div className={`series-score ${offlineTraining ? 'training-score' : ''}`}>
-              {offlineTraining ? <>
+            <div className={`series-score ${drill ? 'training-score' : ''}`}>
+              {drill ? <>
                 <div className="score-team azure-text"><span>DRONES DOWN</span><b>{self?.kills ?? 0}</b></div>
                 <div className="round-readout"><span>DRILL</span><b>{isGunner ? 'DEFENCE' : 'ATTACK'}</b></div>
                 <div className="score-team ember-text"><b>{activeDrones}</b><span>ACTIVE</span></div>
               </> : <>
-                <div className="score-team azure-text"><span>{TEAM_NAMES.azure}</span><b>{snapshot?.roundWins.azure ?? 0}</b></div>
+                <div className="score-team azure-text"><span>{TEAM_NAMES.azure}{onMatchPoint.includes('azure') && <em className="match-point-tag">MATCH POINT</em>}{alivePips('azure')}</span><b>{snapshot?.roundWins.azure ?? 0}</b></div>
                 <div className="round-readout"><span>ROUND · FIRST TO {WINS_NEEDED}</span><b>{String(snapshot?.round ?? 0).padStart(2, '0')} <i>/ {MAX_ROUNDS}</i>{snapshot?.overtime ? <em className="overtime-tag">OT{snapshot.overtime}</em> : null}</b></div>
-                <div className="score-team ember-text"><b>{snapshot?.roundWins.ember ?? 0}</b><span>{TEAM_NAMES.ember}</span></div>
+                <div className="score-team ember-text"><b>{snapshot?.roundWins.ember ?? 0}</b><span>{TEAM_NAMES.ember}{onMatchPoint.includes('ember') && <em className="match-point-tag">MATCH POINT</em>}{alivePips('ember')}</span></div>
               </>}
             </div>
-            <div className={`combat-actions ${offlineTraining ? 'training-actions' : ''}`}>{offlineTraining ? <><span className="training-status">{ARENA_CATALOG.find((arena) => arena.id === selectedArena)?.name.toUpperCase()} · {isGunner ? 'GUN STATION' : JET_CATALOG.find((model) => model.id === selectedModel)?.name}</span><button onClick={resetTraining}>RESET RANGE ↻</button></> : <><span className="room-code">ROOM <b>{roomCode}</b></span><button onClick={copyInvite}>{copied ? 'LINK COPIED ✓' : 'INVITE ↗'}</button></>}<button className="mute-button" onClick={() => { const next = !isMuted(); setMuted(next); setMutedState(next); }} aria-pressed={muted} title="Sound (M)">{muted ? 'SOUND OFF' : 'SOUND ON'}</button><button className="exit-button" onClick={leaveArena}>EXIT</button></div>
+            <div className={`combat-actions ${offlineTraining ? 'training-actions' : ''}`}>{offlineTraining ? <><span className="training-status">{offlineBots ? 'BOT MATCH' : ARENA_CATALOG.find((arena) => arena.id === selectedArena)?.name.toUpperCase()} · {isGunner ? 'GUN STATION' : JET_CATALOG.find((model) => model.id === selectedModel)?.name}</span><button onClick={resetTraining}>{offlineBots ? 'RESTART MATCH ↻' : 'RESET RANGE ↻'}</button></> : <><span className="room-code">ROOM <b>{roomCode}</b></span><button onClick={copyInvite}>{copied ? 'LINK COPIED ✓' : 'INVITE ↗'}</button></>}<button className="mute-button" onClick={toggleSound} aria-pressed={muted} title="Sound (M)">{muted ? 'SOUND OFF' : 'SOUND ON'}</button><button className="mute-button" onClick={toggleMusic} aria-pressed={!musicOn} title="Music (N)">{musicOn ? 'MUSIC ON' : 'MUSIC OFF'}</button><button className="exit-button" onClick={leaveArena}>EXIT</button></div>
           </header>
 
-          <div className="phase-stamp"><span className={phase === 'active' || offlineTraining ? 'phase-live' : ''}>{phaseText}</span><b>{phaseClock}</b></div>
+          <div className="phase-stamp"><span className={phase === 'active' || drill ? 'phase-live' : ''}>{phaseText}</span><b>{phaseClock}</b></div>
           {self && mySide && <div className={`role-chip ${TEAM_CLASS[self.team]}`}><b>{TEAM_SHORT[self.team]}</b> {mySide} <i>·</i> {ROLE_ICON[self.role]} {ROLE_LABEL[self.role]}{isGunner && myStation ? <> <i>·</i> {myStation.kind === 'repair' ? 'REPAIR PAD' : 'STATION'} {myStation.index + 1} · {myTower?.label}</> : null}</div>}
-          {self?.alive && <div className={`self-health ${healthClass(self.hp / 100)}`}><span>{isGunner ? 'UNIT' : 'HULL'}</span><i><em style={{ width: `${self.hp}%` }} /></i><b>{Math.ceil(self.hp)}</b></div>}
+          {self?.alive && <div className={`self-health ${healthClass(self.hp / 100)}`}><span>{isGunner ? 'UNIT' : 'HULL'}</span><i><em style={{ width: `${self.hp}%` }} /></i><b>{Math.ceil(self.hp)}</b><small className="unit-status">{unitStatus(self)}</small></div>}
           {outsideZone && zone && <div className="zone-warning">⚠ OUTSIDE THE SAFE ZONE — TURN BACK <b>−{Math.round(zone.damage)} HP/S</b></div>}
           {incomingMissile ? <div className="threat-warning missile">⚠ MISSILE INBOUND — BREAK!</div> : lockedBy.length ? <div className="threat-warning lock">◎ LOCKED BY {lockedBy.map((player) => player.name).join(', ')}</div> : null}
 
           {(['azure', 'ember'] as const).map((team, index) => <aside key={team} className={`team-panel team-panel-${index ? 'right' : 'left'}`}>
-            <div className={`roster-heading ${team}-text`}><span>0{index + 1}</span> {offlineTraining ? (team === 'azure' ? 'YOU' : 'TARGET DRONES') : TEAM_NAMES[team]}{!offlineTraining && snapshot?.roundKind === 'towers' && phase === 'active' ? <em className="side-tag">{defender === team ? 'DEF' : 'ATK'}</em> : null} <b>{teamPlayers(team).length}/05</b></div>
-            {teamPlayers(team).map((player) => <div className={`pilot-row ${player.alive ? '' : 'pilot-down'}`} key={player.id}><i className="pilot-signal" /><span className="pilot-name"><span className="role-icon" title={ROLE_LABEL[player.role]}>{ROLE_ICON[player.role]}</span>{player.name}<em>{player.role === 'ground' ? `STN ${player.station + 1}` : player.model.toUpperCase()}{player.id === selfIdRef.current ? ' · YOU' : ''}</em></span><span className="pilot-score">{player.kills}<small>K</small></span><div className="pilot-hp"><i className={healthClass(player.hp / 100)} style={{ width: `${player.alive ? player.hp : 0}%` }} /></div></div>)}
+            <div className={`roster-heading ${team}-text`}><span>0{index + 1}</span> {drill ? (team === 'azure' ? 'YOU' : 'TARGET DRONES') : TEAM_NAMES[team]}{!drill && snapshot?.roundKind === 'towers' && phase === 'active' ? <em className="side-tag">{defender === team ? 'DEF' : 'ATK'}</em> : null} <b title="Still in the round / squad size">{survivors(team)}/{teamPlayers(team).length} UP</b></div>
+            {teamPlayers(team).map((player) => <div className={`pilot-row ${player.alive ? '' : 'pilot-down'}`} key={player.id}><i className="pilot-signal" /><span className="pilot-name"><span className="role-icon" title={ROLE_LABEL[player.role]}>{ROLE_ICON[player.role]}</span>{player.name}<em>{player.bot ? 'BOT · ' : ''}{player.role === 'ground' ? `STN ${player.station + 1}` : player.model.toUpperCase()}{player.id === selfIdRef.current ? ' · YOU' : ''}</em></span><span className="pilot-score">{player.kills}<small>K</small></span><div className="pilot-hp"><i className={healthClass(player.hp / 100)} style={{ width: `${player.alive ? player.hp : 0}%` }} /></div></div>)}
           </aside>)}
 
           <div className={`target-lock ${self?.targetId ? 'is-locked' : ''}`}><span>{isGunner ? (self?.targetId ? 'SAM LOCK' : 'SAM SEARCH') : self?.targetId ? 'MISSILE LOCK' : 'SCANNING'}</span><b>{targetLabel}</b></div>
           <div className={`target-reticle ${hitMarker ? 'confirmed-hit' : ''}`} aria-hidden="true"><i /><i /><span>{hitMarker ? '×' : '+'}</span></div>
-          <div className="event-feed">{feed.map((event) => <div className={`feed-line ${event.team ? TEAM_CLASS[event.team] : ''}`} key={event.id}><i>{event.type === 'jet-down' ? '✕' : event.type === 'tower-down' ? '▰' : event.type === 'repair' ? '✚' : event.type === 'sides' ? '⇄' : event.type === 'boundary' ? '!' : '◆'}</i>{event.text}</div>)}</div>
+          <div className="event-feed">{feed.map((event) => <div className={`feed-line ${event.team ? TEAM_CLASS[event.team] : ''}`} key={event.id}><i>{event.type === 'jet-down' ? '✕' : event.type === 'tower-down' ? '▰' : event.type === 'repair' ? '✚' : event.type === 'sides' ? '⇄' : event.type === 'boundary' ? '!' : event.type === 'collapse' ? '⤓' : '◆'}</i>{event.text}</div>)}</div>
+          {killFeed.length > 0 && <div className="kill-feed" aria-live="polite">{killFeed.map((event) => {
+            const killer = event.ownerId ? players.find((player) => player.id === event.ownerId) : undefined;
+            const victim = players.find((player) => player.id === event.targetId);
+            const victimTeam = victim?.team ?? (event.team === 'azure' ? 'ember' : 'azure');
+            // A crash or the zone has no killer: show the event's own wording.
+            return <div key={event.id} className={`kill-line ${victim?.id === selfIdRef.current || killer?.id === selfIdRef.current ? 'mine' : ''}`}>
+              {victim && (killer || event.ownerId?.startsWith('tower:')) ? <>
+                <b className={`${event.team ?? ''}-text`}>{killer?.name ?? event.text.split(' SHOT DOWN ')[0]}</b>
+                <i>{victim?.role === 'ground' ? '⌖✕' : '✈✕'}</i>
+                <b className={`${victimTeam}-text`}>{victim.name}</b>
+              </> : <span className={`${victimTeam}-text`}>{event.text}</span>}
+            </div>;
+          })}</div>}
           {banner && <div className="combat-banner">{banner}</div>}
+          {showPerf && <div className="perf-overlay" aria-label="Performance">
+            <span>FPS <b className={perf.fps && perf.fps < 50 ? 'perf-bad' : ''}>{perf.fps ? perf.fps.toFixed(0) : '—'}</b></span>
+            <span>FRAME <b>{perf.frameMs ? perf.frameMs.toFixed(1) : '—'}</b> / MAX <b className={perf.worstMs > 50 ? 'perf-bad' : ''}>{perf.worstMs ? perf.worstMs.toFixed(0) : '—'}</b> MS</span>
+            <span>PING <b className={perf.pingMs !== null && perf.pingMs > 120 ? 'perf-bad' : ''}>{offlineTraining ? 'OFFLINE' : perf.pingMs === null ? '—' : `${Math.round(perf.pingMs)} MS`}</b></span>
+            {perf.server && <span>SERVER TICK <b className={perf.server.tickMaxMs > 33 ? 'perf-bad' : ''}>{perf.server.tickMs.toFixed(1)}</b> / MAX <b>{perf.server.tickMaxMs.toFixed(1)}</b> MS</span>}
+            {'memory' in performance && <span>HEAP <b>{Math.round((performance as Performance & { memory: { usedJSHeapSize: number } }).memory.usedJSHeapSize / 1_048_576)}</b> MB</span>}
+            <span>ERRORS <b className={perf.errors ? 'perf-bad' : ''}>{perf.errors}</b></span>
+          </div>}
           <RadarScope readState={readState} readSelfId={readSelfId} />
 
           <div className="tower-status-row">
@@ -786,7 +1044,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
                 <small>{tower.hp > 0 ? (health < TOWER.critical ? `CRITICAL${tags ? ' · ' + tags : ''}` : tags || '—') : tower.kind === 'shield' ? 'SHIELD LOST' : tower.kind === 'radar' ? 'RADAR OFFLINE' : 'GUNS OFFLINE'}</small>
               </div>;
             })}
-            {tiebreaker && !offlineTraining && <div className={`zone-status ${zone?.shrinking ? 'closing' : ''}`}>
+            {tiebreaker && !drill && <div className={`zone-status ${zone?.shrinking ? 'closing' : ''}`}>
               <div className="zone-survivors"><b className="azure-text">{survivors('azure')}</b><span>JETS LEFT</span><b className="ember-text">{survivors('ember')}</b></div>
               <div className="zone-survivors zone-health"><i className="azure-text">{squadHealth('azure')} HP</i><span>SQUAD HEALTH</span><i className="ember-text">{squadHealth('ember')} HP</i></div>
               <small>{!zone ? 'SAFE ZONE' : phase !== 'active' ? 'ZONE HOLDS 60S, THEN CLOSES' : zone.closesIn > 0 ? `ZONE CLOSES IN ${Math.ceil(zone.closesIn)}S` : zone.shrinking ? `ZONE CLOSING · ${Math.round(zone.damage)} HP/S OUTSIDE` : `ZONE FULLY CLOSED · ${Math.round(zone.damage)} HP/S OUTSIDE`}</small>
@@ -816,7 +1074,7 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
             <div className="instrument"><span>THR</span><b>{self ? Math.round(self.throttle * 100) : '--'}</b><small>{self?.burner ? 'AB' : '%'}</small></div>
             <div className="instrument"><span>HDG</span><b>{self ? heading(self.yaw) : '---'}</b><small>DEG</small></div>
             {self?.gcas ? <div className="flight-warning">PULL UP</div> : self?.stall ? <div className="flight-warning">STALL</div> : null}
-            <div className="weapon-readout"><span>GUN (LMB / F) <b className={primaryRef.current || keysRef.current.has('f') ? 'trigger-live' : ''}>{primaryRef.current || keysRef.current.has('f') ? 'FIRING' : 'READY'}</b></span><span>MISSILE (RMB / R) <b>{self?.missileCooldown ? `${self.missileCooldown.toFixed(1)}S` : self?.targetId ? 'LOCKED — FIRE' : 'READY · NO LOCK'}</b></span></div>
+            <div className="weapon-readout"><span>GUN (LMB / F) <b className={primaryRef.current || keysRef.current.has('f') ? 'trigger-live' : ''}>{primaryRef.current || keysRef.current.has('f') ? 'FIRING' : 'READY'}</b></span><span>MISSILE (RMB / R) <em className={`missile-count ${self && !self.missileAmmo ? 'instrument-limit' : ''}`}>{self?.missileAmmo ?? 0}/{COMBAT.missileCapacity}</em> <b>{self && !self.missileAmmo ? 'EMPTY' : self?.missileCooldown ? `RELOAD ${self.missileCooldown.toFixed(1)}S` : self?.targetId ? 'LOCKED — FIRE' : 'READY · NO LOCK'}</b></span></div>
           </div>}
 
           {isGunner && self?.alive && stations.length > 0 && <div className="station-picker" role="group" aria-label="Gun stations">
@@ -832,13 +1090,13 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
             <button type="button" className="shield-button" disabled={self.barrierCooldown > 0 || self.transit > 0 || !myTower || myTower.hp <= 0} onClick={requestBarrier} title="Shield the tower beside you"><b>⛨</b><small>F</small></button>
           </div>}
 
-          {self && !self.alive && phase === 'active' && <div className="spectator-note">{offlineTraining ? 'DOWN — BACK IN A MOMENT' : <>ELIMINATED — NO RESPAWNS UNTIL ROUND {snapshot?.round} ENDS<br />{spectating ? <>SPECTATING <b>{spectating.name}</b> · {ROLE_LABEL[spectating.role]} · Q / E OR CLICK TO SWITCH</> : 'NO TEAMMATES LEFT'}</>}</div>}
-          {phase === 'prep' && tiebreaker && !offlineTraining && <div className="sudden-death-card" aria-live="assertive">
+          {self && !self.alive && phase === 'active' && <div className="spectator-note">{drill ? 'DOWN — BACK IN A MOMENT' : <>ELIMINATED — NO RESPAWNS UNTIL ROUND {snapshot?.round} ENDS<br />{spectating ? <>SPECTATING <b>{spectating.name}</b> · {ROLE_LABEL[spectating.role]} · {Math.ceil(spectating.hp)} HP · {spectating.kills} K<br /><span className="spectator-hint">{survivors(spectating.team)} TEAMMATE{survivors(spectating.team) === 1 ? '' : 'S'} LEFT · Q / E OR CLICK TO SWITCH</span></> : 'NO TEAMMATES LEFT'}</>}</div>}
+          {phase === 'prep' && tiebreaker && !drill && <div className="sudden-death-card" aria-live="assertive">
             <span>ROUND 11{snapshot?.overtime ? ` · OVERTIME ${snapshot.overtime}` : ''} · {snapshot?.roundWins.azure}–{snapshot?.roundWins.ember}</span>
             <strong>SUDDEN DEATH</strong>
             <p>All ten pilots in the air. No towers. Last squadron flying wins. {Math.round(TIEBREAKER_SECONDS / 60)} minutes — the safe zone starts closing after 60 seconds.</p>
           </div>}
-          {phase === 'prep' && self && !offlineTraining && <div className={`prep-panel ${tiebreaker ? 'prep-sudden' : ''}`}>
+          {phase === 'prep' && self && !drill && <div className={`prep-panel ${tiebreaker ? 'prep-sudden' : ''}`}>
             <span className="prep-kicker">ROUND {snapshot?.round}{snapshot?.overtime ? ` · OT${snapshot.overtime}` : ''} · PREPARATION · {snapshot?.phaseSecondsLeft}S</span>
             <strong>{tiebreaker ? 'SUDDEN DEATH — ALL JETS' : defender === self.team ? 'YOU DEFEND' : 'YOU ATTACK'} <em>· {ROLE_ICON[self.role]} {ROLE_LABEL[self.role]}</em></strong>
             {isGunner ? <>
@@ -850,26 +1108,37 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
             </>}
             {!tiebreaker && <div className="tower-brief">{towers.map((tower) => <div key={tower.id}><b>{tower.label}</b><small>{TOWER_ROLE[tower.kind]}</small></div>)}</div>}
           </div>}
-          {phase === 'countdown' && !offlineTraining && <div className={`combat-countdown ${tiebreaker ? 'sudden-death' : ''}`}><span>{tiebreaker ? 'SUDDEN DEATH · WEAPONS FREE IN' : 'WEAPONS FREE IN'}</span><b>{snapshot?.phaseSecondsLeft}</b></div>}
-          {offlineTraining && isGunner && self && <div className="training-loadout">{LOADOUTS.map(([id, option]) => <button key={id} type="button" className={self.loadout === id ? 'selected' : ''} onClick={() => chooseEquipment({ loadout: id })}>{option.name}</button>)}</div>}
+          {phase === 'countdown' && !drill && <div className={`combat-countdown ${tiebreaker ? 'sudden-death' : ''}`}><span>{tiebreaker ? 'SUDDEN DEATH · WEAPONS FREE IN' : 'WEAPONS FREE IN'}</span><b>{snapshot?.phaseSecondsLeft}</b></div>}
+          {drill && isGunner && self && <div className="training-loadout">{LOADOUTS.map(([id, option]) => <button key={id} type="button" className={self.loadout === id ? 'selected' : ''} onClick={() => chooseEquipment({ loadout: id })}>{option.name}</button>)}</div>}
           {phase === 'intermission' && lastRound && <div className="round-card">
             <span>{roundLabel(lastRound)} · {lastRound.kind === 'tiebreaker' ? 'SUDDEN DEATH' : `${TEAM_SHORT[lastRound.defender!]} DEFENDED`}</span>
             <strong className={lastRound.winner ? `${lastRound.winner}-text` : ''}>{lastRound.winner ? `${TEAM_NAMES[lastRound.winner]} WINS` : lastRound.kind === 'tiebreaker' ? 'DRAW — SUDDEN DEATH OVERTIME' : 'DRAW — REPLAY'}</strong>
             <p>{lastRound.reason}</p>
             <div className="round-card-next">NEXT · ROUND {nextRound}{nextOvertime ? ` · OVERTIME ${nextOvertime}` : ''} · {nextDefender ? `${TEAM_NAMES[nextDefender]} DEFENDS${self ? ` · YOU ${nextDefender === self.team ? 'DEFEND' : 'ATTACK'}` : ''}` : 'SUDDEN DEATH — ALL JETS, NO TOWERS'}</div>
             {nextRound === ROUNDS_PER_HALF + 1 && !nextOvertime && <div className="round-card-switch">⇄ SIDES SWITCH</div>}
+            {nextDefender && matchPointTeams(snapshot!.roundWins).map((team) => <div key={team} className={`round-card-match-point ${team}-text`}>MATCH POINT · {TEAM_NAMES[team]}</div>)}
           </div>}
           {phase === 'complete' && snapshot && <ResultsScreen state={snapshot} selfId={selfIdRef.current} onLeave={leaveArena} />}
-          {phase === 'lobby' && !offlineTraining && <div className="awaiting-card">
+          {phase === 'lobby' && !drill && <div className="awaiting-card">
             <i>✣</i>
-            <b>{snapshot?.phaseSecondsLeft ? `MATCH STARTS IN ${snapshot.phaseSecondsLeft}` : 'WAITING FOR BOTH TEAMS'}</b>
-            <span>SHARE THE ROOM LINK · {rosterCount}/{MAX_PLAYERS} PLAYERS · YOU ARE ON {self ? TEAM_NAMES[self.team] : '—'}</span>
+            <b>{snapshot?.phaseSecondsLeft ? `MATCH STARTS IN ${snapshot.phaseSecondsLeft}` : 'WAITING FOR BOTH TEAMS — OR ADD BOTS'}</b>
+            <span>{offlineBots ? 'OFFLINE BOT MATCH' : 'SHARE THE ROOM LINK'} · {rosterCount}/{MAX_PLAYERS} PLAYERS · YOU ARE ON {self ? TEAM_NAMES[self.team] : '—'}</span>
             <span>ROUNDS 1–5: {TEAM_NAMES.azure} DEFENDS · ROUNDS 6–10: {TEAM_NAMES.ember} DEFENDS</span>
+            <div className="bot-controls" role="group" aria-label="Bots">
+              <em>BOTS {bots}/{MAX_PLAYERS - 1}</em>
+              {(['azure', 'ember'] as const).map((team) => <span key={team} className="bot-team">
+                <b className={`${team}-text`}>{TEAM_SHORT[team]} {teamPlayers(team).length}/{MAX_TEAM_SIZE}</b>
+                <button type="button" onClick={() => manageBots('remove', team)} disabled={!teamPlayers(team).some((player) => player.bot)} aria-label={`Remove a bot from ${TEAM_NAMES[team]}`}>−</button>
+                <button type="button" onClick={() => manageBots('add', team)} disabled={teamPlayers(team).length >= MAX_TEAM_SIZE} aria-label={`Add a bot to ${TEAM_NAMES[team]}`}>+</button>
+              </span>)}
+              <button type="button" onClick={() => manageBots('fill')} disabled={rosterCount >= MAX_PLAYERS}>FILL WITH BOTS</button>
+              <button type="button" onClick={() => manageBots('clear')} disabled={!bots}>CLEAR</button>
+            </div>
             <div className="preference-toggle" role="group" aria-label="Preferred role when defending"><em>WHEN DEFENDING</em>{PREFERENCES.map((preference) => <button key={preference.id} type="button" className={rolePreference === preference.id ? 'selected' : ''} aria-pressed={rolePreference === preference.id} title={preference.hint} onClick={() => chooseRolePreference(preference.id)}>{preference.label}</button>)}</div>
           </div>}
           <div className="control-legend">{isGunner
-            ? <><span><kbd>MOUSE</kbd><kbd>WASD</kbd> AIM</span><span><kbd>LMB</kbd> AA CANNON</span><span><kbd>RMB</kbd> SAM (LOCK)</span><span><kbd>1</kbd>–<kbd>9</kbd><kbd>Q</kbd><kbd>E</kbd> MOVE</span><span><kbd>R</kbd> HOLD TO REPAIR (PAD)</span><span><kbd>F</kbd> SHIELD</span><span><kbd>M</kbd> SOUND</span></>
-            : <><span><kbd>MOUSE</kbd><kbd>↑</kbd><kbd>↓</kbd> PITCH</span><span><kbd>A</kbd><kbd>D</kbd> TURN</span><span><kbd>Q</kbd><kbd>E</kbd> ROLL</span><span><kbd>W</kbd><kbd>S</kbd> THROTTLE</span><span><kbd>SPACE</kbd> AFTERBURNER</span><span><kbd>SHIFT</kbd> AIR BRAKE</span><span><kbd>LMB</kbd><kbd>F</kbd> CANNON</span><span><kbd>RMB</kbd><kbd>R</kbd> MISSILE</span><span><kbd>M</kbd> SOUND</span></>}</div>
+            ? <><span><kbd>MOUSE</kbd><kbd>WASD</kbd> AIM</span><span><kbd>LMB</kbd> AA CANNON</span><span><kbd>RMB</kbd> SAM (LOCK)</span><span><kbd>1</kbd>–<kbd>9</kbd><kbd>Q</kbd><kbd>E</kbd> MOVE</span><span><kbd>R</kbd> HOLD TO REPAIR (PAD)</span><span><kbd>F</kbd> SHIELD</span><span><kbd>M</kbd> SOUND</span><span><kbd>N</kbd> MUSIC</span><span><kbd>`</kbd> STATS</span></>
+            : <><span><kbd>MOUSE</kbd><kbd>↑</kbd><kbd>↓</kbd> PITCH</span><span><kbd>A</kbd><kbd>D</kbd> TURN</span><span><kbd>Q</kbd><kbd>E</kbd> ROLL</span><span><kbd>W</kbd><kbd>S</kbd> THROTTLE</span><span><kbd>SPACE</kbd> AFTERBURNER</span><span><kbd>SHIFT</kbd> AIR BRAKE</span><span><kbd>LMB</kbd><kbd>F</kbd> CANNON</span><span><kbd>RMB</kbd><kbd>R</kbd> MISSILE</span><span><kbd>M</kbd> SOUND</span><span><kbd>N</kbd> MUSIC</span><span><kbd>`</kbd> STATS</span></>}</div>
 
           <div className="touch-flight-controls">
             <div className="touch-stick"><button onPointerDown={(event) => capturePress(event, 'arrowup')} onPointerUp={() => setKey('arrowup', false)} onPointerCancel={() => setKey('arrowup', false)} aria-label={isGunner ? 'Raise gun' : 'Nose up'}>↑</button><button onPointerDown={(event) => capturePress(event, 'a')} onPointerUp={() => setKey('a', false)} onPointerCancel={() => setKey('a', false)}>←</button><button onPointerDown={(event) => capturePress(event, 'arrowdown')} onPointerUp={() => setKey('arrowdown', false)} onPointerCancel={() => setKey('arrowdown', false)} aria-label={isGunner ? 'Lower gun' : 'Nose down'}>↓</button><button onPointerDown={(event) => capturePress(event, 'd')} onPointerUp={() => setKey('d', false)} onPointerCancel={() => setKey('d', false)}>→</button><button onPointerDown={(event) => capturePress(event, 'q')} onPointerUp={() => setKey('q', false)} onPointerCancel={() => setKey('q', false)}>↶</button><button onPointerDown={(event) => capturePress(event, 'e')} onPointerUp={() => setKey('e', false)} onPointerCancel={() => setKey('e', false)}>↷</button></div>
@@ -886,7 +1155,9 @@ export function GameClient({ initialTraining = null }: { initialTraining?: Initi
 
 function ResultsScreen({ state, selfId, onLeave }: { state: RoomState; selfId: string; onLeave: () => void }) {
   const winner = state.matchWinner;
-  const scored = state.players.map((player) => ({ player, score: playerScore(player) }));
+  // Players who left mid-match keep their line, marked LEFT.
+  const departedIds = new Set(state.departed.map((player) => player.id));
+  const scored = [...state.players, ...state.departed].map((player) => ({ player, score: playerScore(player) }));
   const mvp = scored.reduce<{ player: JetState; score: number } | null>((best, entry) => (!best || entry.score > best.score ? entry : best), null);
   const decider = state.history.at(-1);
   const suddenDeath = Boolean(winner && decider?.kind === 'tiebreaker' && decider.winner === winner);
@@ -901,8 +1172,8 @@ function ResultsScreen({ state, selfId, onLeave }: { state: RoomState; selfId: s
     <div className="results-tables">{(['azure', 'ember'] as const).map((team) => <table key={team} className={`results-table ${team}`}>
       <caption className={`${team}-text`}>{TEAM_NAMES[team]} · {state.roundWins[team]} ROUNDS</caption>
       <thead><tr><th>PLAYER</th><th>K</th><th>D</th><th>DMG</th><th>TOWER</th><th>REPAIR</th><th>SCORE</th></tr></thead>
-      <tbody>{scored.filter(({ player }) => player.team === team).sort((a, b) => b.score - a.score).map(({ player, score }) => <tr key={player.id} className={player.id === selfId ? 'is-self' : ''}>
-        <td>{mvp && mvp.score > 0 && mvp.player.id === player.id ? <em className="mvp">MVP</em> : null}{player.name}</td><td>{player.kills}</td><td>{player.deaths}</td><td>{Math.round(player.damage)}</td><td>{Math.round(player.towerDamage)}</td><td>{Math.round(player.repaired)}</td><td><b>{score}</b></td>
+      <tbody>{scored.filter(({ player }) => player.team === team).sort((a, b) => b.score - a.score).map(({ player, score }) => <tr key={player.id} className={`${player.id === selfId ? 'is-self' : ''} ${departedIds.has(player.id) ? 'is-departed' : ''}`}>
+        <td>{mvp && mvp.score > 0 && mvp.player.id === player.id ? <em className="mvp">MVP</em> : null}{player.name}{player.bot ? <em className="left-tag">BOT</em> : null}{departedIds.has(player.id) ? <em className="left-tag">LEFT</em> : null}</td><td>{player.kills}</td><td>{player.deaths}</td><td>{Math.round(player.damage)}</td><td>{Math.round(player.towerDamage)}</td><td>{Math.round(player.repaired)}</td><td><b>{score}</b></td>
       </tr>)}</tbody>
     </table>)}</div>
     <p>NEW MATCH IN THIS ROOM IN {state.phaseSecondsLeft}S</p>

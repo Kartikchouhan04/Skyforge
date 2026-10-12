@@ -11,7 +11,8 @@
     "build": "next build",
     "start": "tsx server.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx tests/match.test.ts"
+    "test": "tsx tests/match.test.ts",
+    "sim:bots": "tsx tests/bots-sim.ts"
   },
   "dependencies": {
     "next": "^16.0.0",

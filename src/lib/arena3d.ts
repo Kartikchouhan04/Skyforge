@@ -528,6 +528,7 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
   const towerObjects = new Map<string, TowerObject>();
   const zoneWall = buildZoneWall(scene);
   let stationSet: ReturnType<typeof buildStations> | undefined;
+  let stationLayoutKey = '';
   let towerLayoutKey = '';
   // Projectiles share geometry and materials (flak fires ten rounds a second
   // per gun, so never build any per shot). Gun rounds are glowing tracer
@@ -832,9 +833,14 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
         towerLayoutKey = layoutKey;
         for (const tower of towerObjects.values()) tower.dispose();
         towerObjects.clear();
-        stationSet?.dispose(); stationSet = undefined;
         for (const tower of snapshot.towers) towerObjects.set(tower.id, buildTower(scene, tower, surfaceMaps));
-        if (snapshot.stations.length) stationSet = buildStations(scene, snapshot.stations, surfaceMaps);
+      }
+      // Stations rebuild with the layout, and when a fallen tower drops its platforms to the ground.
+      const stationKey = snapshot.stations.map((station) => `${station.id}:${station.mount}:${Math.round(station.x)}:${Math.round(station.z)}`).join('|');
+      if (stationKey !== stationLayoutKey && surfaceMaps) {
+        stationLayoutKey = stationKey;
+        stationSet?.dispose(); stationSet = undefined;
+        if (snapshot.stations.length) stationSet = buildStations(scene, snapshot.stations, surfaceMaps, snapshot.towers);
       }
       for (const tower of snapshot.towers) {
         towerObjects.get(tower.id)?.update(tower, frameDelta, now);
@@ -900,7 +906,7 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
             setRepairBeam(object, beamTarget, now);
             if (Math.random() < frameDelta * 6) sparksAt(repairing.x + (Math.random() - .5) * TOWER.radius, TOWER.height * .35, repairing.z + (Math.random() - .5) * TOWER.radius, 4, 40 * FLIGHT_SCALE);
           } else setRepairBeam(object, null, now);
-          if (!jet.alive && Math.random() < frameDelta * 2) jetSmoke.emit(jet.x, 6 * FLIGHT_SCALE, jet.z, 0, 12 * FLIGHT_SCALE, 0, 3, .12, .12, .13, .5);
+          if (!jet.alive && Math.random() < frameDelta * 2) jetSmoke.emit(jet.x, jet.y, jet.z, 0, 12 * FLIGHT_SCALE, 0, 3, .12, .12, .13, .5);
           continue;
         }
         object.visible = jet.alive;
@@ -956,7 +962,7 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
         const aim = viewed.id === selfId && localAim ? localAim : viewed;
         aimDirection.set(Math.sin(aim.yaw) * Math.cos(aim.pitch), Math.sin(aim.pitch), Math.cos(aim.yaw) * Math.cos(aim.pitch));
         flatAim.set(Math.sin(aim.yaw), 0, Math.cos(aim.yaw));
-        desiredCamera.set(viewedObject.position.x, GROUND.gunHeight + 14 * FLIGHT_SCALE, viewedObject.position.z).addScaledVector(flatAim, -24 * FLIGHT_SCALE);
+        desiredCamera.set(viewedObject.position.x, viewedObject.position.y + GROUND.gunHeight + 14 * FLIGHT_SCALE, viewedObject.position.z).addScaledVector(flatAim, -24 * FLIGHT_SCALE);
         if (!hasGunnerCamera) camera.position.copy(desiredCamera);
         else camera.position.lerp(desiredCamera, damp(16, frameDelta));
         hasGunnerCamera = true;
@@ -1034,11 +1040,16 @@ export function mountArena(host: HTMLDivElement, readState: () => RoomState | nu
             if (mine) sfx.cannon();
           } else if (shot.kind === 'missile' || shot.kind === 'sam') {
             if (mine || camera.position.distanceTo(object.position.set(shot.x, shot.y, shot.z)) < 1_400 * S) sfx.missileLaunch();
-          } else if (mine) sfx.cannon();
+          } else if (mine) sfx.flakGun();
           if (shot.kind === 'flak') {
             const gun = jetObjects.get(shot.ownerId);
             if (gun?.userData.kind === 'ground') flashGroundUnit(gun, now);
-            else if (shot.ownerId.startsWith('tower:')) towerObjects.get(shot.ownerId.slice(6))?.fired(shot.yaw, shot.pitch, now);
+            else if (shot.ownerId.startsWith('tower:')) {
+              towerObjects.get(shot.ownerId.slice(6))?.fired(shot.yaw, shot.pitch, now);
+              // Weapons Tower mounts: deeper from the low sponsons, fading with distance.
+              const away = camera.position.distanceTo(object.position.set(shot.x, shot.y, shot.z));
+              sfx.towerGun(Math.min(1, shot.y / TOWER.height), Math.max(0, 1 - away / (TOWER.weaponsRange * 2.5)));
+            }
           }
         }
         const shotTrack = sample(shotTracks, shot.id, shot.x, shot.y, shot.z, shot.yaw, shot.pitch, shot.speed ?? PROJECTILE_SPEED[shot.kind], now);

@@ -3,8 +3,9 @@ import { ARENA_SCALE, FLIGHT_SCALE, GROUND, TOWER, type JetState, type StationSt
 import { addBox, basic, detailedStandard, mergeStaticMeshes, standard, TEAM_COLORS, TEAM_MATERIALS, type SurfaceMaps } from '@/lib/arena-kit';
 
 /**
- * The defenders' hardware: the three strategic towers, the gun stations in
- * front of them, and the mobile anti-aircraft units ground defenders crew.
+ * The defenders' hardware: the three strategic towers, the gun platforms on
+ * them (upper deck and shaft balcony) and repair pads at their feet, and the
+ * mobile anti-aircraft units ground defenders crew.
  * Static parts are merged per moving piece, because draw calls are what limit
  * this scene.
  */
@@ -155,6 +156,21 @@ export function buildTower(scene: THREE.Scene, tower: TowerState, surfaces: Surf
     dish.rotation.x = -Math.PI / 2.3; dish.position.set(0, 8, -2); spinner.add(dish);
     addBox(spinner, '#1b2a33', [.8, .8, 9], [0, 8, 2.5], darkSteel);
   } else if (tower.kind === 'weapons') {
+    // Low and mid flak sponsons on the shaft, at the heights in TOWER.weaponsMounts.
+    for (const [y, radius] of [[24, 13.4], [40, 11.9]]) {
+      for (const angle of [-.7, .7, Math.PI]) {
+        addBox(lower, '#1b2a33', [5, 3.4, 4], [Math.sin(angle) * (radius + 1.5), y, Math.cos(angle) * (radius + 1.5)], darkSteel).rotation.y = angle;
+        for (const offset of [-1, 1]) {
+          const barrel = new THREE.Mesh(new THREE.CylinderGeometry(.35, .45, 6, 6), darkSteel);
+          barrel.rotation.order = 'YXZ';
+          barrel.rotation.x = Math.PI / 2 - .5;
+          const along = radius + 4.5;
+          barrel.position.set(Math.sin(angle) * along + Math.cos(angle) * offset, y + 1.6, Math.cos(angle) * along - Math.sin(angle) * offset);
+          barrel.rotation.y = angle;
+          lower.add(barrel);
+        }
+      }
+    }
     // A twin-gun turret that tracks its targets.
     addBox(spinner, '#1b2a33', [9, 4, 9], [0, 2, 0], darkSteel);
     turretPitch.position.y = 4; spinner.add(turretPitch);
@@ -249,8 +265,19 @@ export function buildTower(scene: THREE.Scene, tower: TowerState, surfaces: Surf
 
 /* ---------------------------------------------------------------- stations */
 
-/** All six gun stations and three repair pads of one defending side, as one merged group. */
-export function buildStations(scene: THREE.Scene, stations: StationState[], surfaces: SurfaceMaps) {
+/** Radius of the tower shaft at a height (world units), from the model above. */
+function shaftRadiusAt(y: number) {
+  const level = y / ARENA_SCALE;
+  return (level > 46 ? 11 : 15 - (level - 6) / 40 * 4) * ARENA_SCALE;
+}
+
+/**
+ * All six gun stations and three repair pads of one defending side, as one
+ * merged group. Deck stations are marked on the tower's upper deck; balcony
+ * stations hang off the shaft on a braced platform; ground stations (repair
+ * pads, and gun emplacements once their tower has fallen) sit on the floor.
+ */
+export function buildStations(scene: THREE.Scene, stations: StationState[], surfaces: SurfaceMaps, towers: TowerState[] = []) {
   const group = new THREE.Group();
   scene.add(group);
   const pad = detailedStandard('#3a4a53', .82, .12, surfaces, 'concrete');
@@ -284,12 +311,41 @@ export function buildStations(scene: THREE.Scene, stations: StationState[], surf
   atlas.colorSpace = THREE.SRGBColorSpace;
   const numberMaterial = new THREE.MeshBasicMaterial({ map: atlas });
   const textures: THREE.Texture[] = [atlas];
+  const platform = detailedStandard('#4a5c66', .5, .55, surfaces, 'steel');
+  const brace = standard('#2a3a43', .45, .65);
   for (const station of stations) {
     const spot = new THREE.Group();
-    spot.position.set(station.x, 0, station.z);
+    spot.position.set(station.x, station.y, station.z);
     spot.scale.setScalar(FLIGHT_SCALE);
     group.add(spot);
     const repair = station.kind === 'repair';
+    const tower = towers.find((item) => item.id === station.towerId);
+    if (station.mount !== 'ground' && tower) {
+      // Face the tower: local +z points at its axis.
+      spot.rotation.y = Math.atan2(tower.x - station.x, tower.z - station.z);
+      const toAxis = Math.hypot(tower.x - station.x, tower.z - station.z) / FLIGHT_SCALE;
+      if (station.mount === 'balcony') {
+        // A braced steel platform bolted to the shaft, with a rail and lift cage.
+        const reach = toAxis - shaftRadiusAt(station.y) / FLIGHT_SCALE + 3;
+        const deck = new THREE.Mesh(new THREE.CylinderGeometry(19, 19, 2, 16), platform);
+        deck.position.y = -1; deck.castShadow = true; deck.receiveShadow = true; spot.add(deck);
+        addBox(spot, '#4a5c66', [14, 2, reach], [0, -1, reach / 2], platform);
+        for (const side of [-1, 1]) {
+          const strut = addBox(spot, '#2a3a43', [1.4, 1.4, Math.hypot(reach, 40)], [side * 9, -21, reach / 2 + 4], brace);
+          strut.rotation.x = Math.atan2(40, reach);
+        }
+        const rail = new THREE.Mesh(new THREE.TorusGeometry(19, .35, 4, 32, Math.PI * 1.6), brace);
+        rail.rotation.x = Math.PI / 2; rail.rotation.z = Math.PI * 1.7; rail.position.y = 3; spot.add(rail);
+      }
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(17, .45, 4, 32), hazard);
+      ring.rotation.x = Math.PI / 2; ring.position.y = .15; spot.add(ring);
+      const plane = new THREE.PlaneGeometry(8, 8);
+      const uv = plane.getAttribute('uv');
+      for (let index = 0; index < uv.count; index += 1) uv.setX(index, (station.index % cells + uv.getX(index)) / cells);
+      const number = new THREE.Mesh(plane, numberMaterial);
+      number.rotation.x = -Math.PI / 2; number.position.set(0, .2, -11); spot.add(number);
+      continue;
+    }
     const base = new THREE.Mesh(new THREE.CylinderGeometry(repair ? 16 : 20, repair ? 18 : 22, 1.2, 16), pad);
     base.position.y = .6; base.receiveShadow = true; spot.add(base);
     const ring = new THREE.Mesh(new THREE.TorusGeometry(repair ? 16.6 : 20.6, .45, 4, 32), repair ? medic : hazard);
@@ -403,7 +459,7 @@ export function updateGroundUnit(unit: THREE.Group, player: JetState, dt: number
     data.heading = Math.atan2(-Math.sign(player.x), 0);
   }
   data.lastX = player.x; data.lastZ = player.z;
-  unit.position.set(player.x, 0, player.z);
+  unit.position.set(player.x, player.y - GROUND.gunHeight, player.z);
   const turn = data.heading - data.body.rotation.y;
   data.body.rotation.y += Math.atan2(Math.sin(turn), Math.cos(turn)) * Math.min(1, dt * 4);
   if (player.alive) {

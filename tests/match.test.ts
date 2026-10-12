@@ -3,10 +3,12 @@
  * draws and replays. Run with `npm test` (npx tsx tests/match.test.ts).
  */
 import assert from 'node:assert/strict';
-import { GROUND_LOADOUTS, SUDDEN_DEATH, TIEBREAKER_SECONDS, TOWER, type Team } from '../src/lib/protocol';
+import { COMBAT, GROUND, GROUND_LOADOUTS, MAX_PLAYERS, SUDDEN_DEATH, TIEBREAKER_SECONDS, TOWER, matchPointTeams, type Team } from '../src/lib/protocol';
 import {
-  addPlayer, COUNTDOWN_MS, createMatchRoom, drainAudit, PREP_MS, snapshotRoom, stepMatch, zoneAt, type MatchPlayer, type MatchRoom,
+  addBot, addPlayer, botCount, COUNTDOWN_MS, createMatchRoom, decideAfterRound, drainAudit, hasSeatForHuman, isFull, LOBBY_MS, makeRoomForHuman, manageBots, pickOpenRoom, PREP_MS,
+  removeBot, removePlayer, resetToLobby, snapshotRoom, stepMatch, stepTowers, teamCount, zoneAt, type MatchPlayer, type MatchRoom,
 } from '../src/lib/match';
+import { createBotMatchSession, stepTraining, TRAINING_PLAYER_ID } from '../src/lib/training';
 
 const TICK_MS = 1_000 / 30;
 let passed = 0;
@@ -241,6 +243,265 @@ test('every result is recorded with its simulation tick for the server log', () 
   assert.deepEqual(audit[0].alive, { azure: 0, ember: 0 });
   assert.equal(room.history.at(-1)!.tick, room.tick);
   assert.equal(drainAudit(room).length, 0);
+});
+
+console.log('Match flow (section 14) and HUD data (section 12)');
+
+test('after a round: six wins ends it, a draw replays, 5–5 after round 10 goes to Sudden Death, else next round', () => {
+  assert.equal(decideAfterRound(4, { azure: 1, ember: 3 }, 'ember'), 'next-round');
+  assert.equal(decideAfterRound(5, { azure: 3, ember: 2 }, null), 'replay');
+  assert.equal(decideAfterRound(11, { azure: 5, ember: 5 }, null), 'replay');
+  assert.equal(decideAfterRound(8, { azure: 6, ember: 2 }, 'azure'), 'match-end');
+  assert.equal(decideAfterRound(10, { azure: 6, ember: 4 }, 'azure'), 'match-end');
+  assert.equal(decideAfterRound(10, { azure: 5, ember: 5 }, 'ember'), 'sudden-death');
+  assert.equal(decideAfterRound(11, { azure: 6, ember: 5 }, 'azure'), 'match-end');
+});
+
+test('round 10 won to 5–5 leads to round 11 Sudden Death', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 10, { azure: 5, ember: 4 });
+  toCombat(room, clock);
+  for (const player of squad(room, 'azure')) kill(player); // Red defends round 10 and holds.
+  step(room, clock);
+  assert.equal(room.phase, 'intermission');
+  assert.deepEqual(room.roundWins, { azure: 5, ember: 5 });
+  until(room, clock, () => room.phase === 'prep');
+  assert.equal(room.round, 11);
+  assert.equal(room.roundKind, 'tiebreaker');
+});
+
+test('match point is announced when a round starts with a team one win away, never in Sudden Death', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 7, { azure: 5, ember: 1 });
+  const points = snapshotRoom(room, clock.now).events.filter((event) => event.type === 'match-point');
+  assert.equal(points.length, 1);
+  assert.equal(points[0].team, 'azure');
+  assert.deepEqual(matchPointTeams({ azure: 5, ember: 1 }), ['azure']);
+  const tie = fullRoom();
+  jumpTo(tie.room, tie.clock, 11, { azure: 5, ember: 5 });
+  assert.equal(snapshotRoom(tie.room, tie.clock.now).events.filter((event) => event.type === 'match-point').length, 0);
+  const early = fullRoom();
+  jumpTo(early.room, early.clock, 3, { azure: 2, ember: 0 });
+  assert.equal(snapshotRoom(early.room, early.clock.now).events.filter((event) => event.type === 'match-point').length, 0);
+});
+
+test('jets carry a limited number of missiles per round, refilled next round', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 1, { azure: 0, ember: 0 });
+  toCombat(room, clock);
+  const shooter = squad(room, 'ember')[0];
+  assert.equal(shooter.missileAmmo, COMBAT.missileCapacity);
+  const fired = new Set<string>();
+  for (let tick = 0; tick < COMBAT.missileCapacity + 4; tick += 1) {
+    shooter.x = 9_000; shooter.z = 9_000; shooter.hp = 100;
+    shooter.missileReadyAt = 0;
+    shooter.input = { ...shooter.input, secondary: true };
+    step(room, clock);
+    for (const shot of room.projectiles) if (shot.ownerId === shooter.id && shot.kind === 'missile') fired.add(shot.id);
+  }
+  assert.equal(shooter.missileAmmo, 0);
+  assert.equal(fired.size, COMBAT.missileCapacity);
+  assert.equal(snapshotRoom(room, clock.now).players.find((player) => player.id === shooter.id)!.missileAmmo, 0);
+  jumpTo(room, clock, 2, { azure: 0, ember: 1 });
+  assert.equal(room.players.get(shooter.id)!.missileAmmo, COMBAT.missileCapacity);
+});
+
+test('players who leave mid-match stay on the final scoreboard', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 2, { azure: 1, ember: 0 });
+  toCombat(room, clock);
+  const leaver = squad(room, 'ember')[0];
+  leaver.kills = 3;
+  removePlayer(room, leaver.id);
+  assert.deepEqual(snapshotRoom(room, clock.now).departed, [], 'only sent once the match is over');
+  room.roundWins = { azure: 5, ember: 0 };
+  for (const player of squad(room, 'ember')) kill(player);
+  step(room, clock);
+  assert.equal(room.phase, 'complete');
+  const departed = snapshotRoom(room, clock.now).departed;
+  assert.equal(departed.length, 1);
+  assert.equal(departed[0].id, leaver.id);
+  assert.equal(departed[0].kills, 3);
+  resetToLobby(room);
+  assert.equal(room.departed.length, 0);
+});
+
+test('matchmaking picks the fullest open room still forming, and skips full or running ones', () => {
+  const clock = { now: 1_000_000 };
+  const make = (code: string, size: number) => {
+    const room = createMatchRoom(code, 'skyforge');
+    for (let index = 0; index < size; index += 1) addPlayer(room, { id: `${code}${index}`, name: `${code}${index}`, model: 'swift' }, clock.now);
+    return room;
+  };
+  const small = make('A', 2);
+  const bigger = make('B', 6);
+  const full = make('C', 10);
+  const running = make('D', 8);
+  running.phase = 'active';
+  assert.equal(pickOpenRoom([small, bigger, full, running]), bigger);
+  assert.equal(pickOpenRoom([full, running]), undefined);
+  assert.equal(pickOpenRoom([]), undefined);
+});
+
+console.log('Tower-mounted defence');
+
+test('gun stations are on the towers at two heights; crews stand up there', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 1, { azure: 0, ember: 0 });
+  const guns = room.stations.filter((station) => station.kind === 'gun');
+  assert.equal(guns.length, 6);
+  assert.deepEqual([...new Set(guns.map((station) => station.y))].sort((a, b) => a - b), [TOWER.balconyHeight, TOWER.deckHeight]);
+  for (const station of guns) {
+    const tower = room.towers.find((item) => item.id === station.towerId)!;
+    const radius = Math.hypot(station.x - tower.x, station.z - tower.z);
+    assert.ok(Math.abs(radius - (station.mount === 'deck' ? TOWER.deckRadius : TOWER.balconyRadius)) < 1);
+  }
+  assert.ok(room.stations.filter((station) => station.kind === 'repair').every((station) => station.y === 0));
+  const crew = squad(room, 'azure').filter((player) => player.role === 'ground');
+  assert.equal(crew.length, 3);
+  for (const unit of crew) assert.equal(unit.y, room.stations[unit.station].y + GROUND.gunHeight);
+});
+
+test('moving between towers: lift down, drive along the ground, lift up', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 1, { azure: 0, ember: 0 });
+  toCombat(room, clock);
+  const unit = squad(room, 'azure').find((player) => player.role === 'ground' && room.stations[player.station].mount === 'deck')!;
+  const from = room.stations[unit.station];
+  const target = room.stations.find((station) => station.mount === 'balcony' && station.towerId !== from.towerId && !station.occupantId)!;
+  unit.input = { ...unit.input, station: target.index };
+  let lowest = unit.y;
+  until(room, clock, () => {
+    park(room);
+    unit.input = { ...unit.input, station: target.index };
+    lowest = Math.min(lowest, unit.y);
+    return unit.transit <= 0 && unit.station === target.index;
+  }, 30_000);
+  assert.equal(lowest, GROUND.gunHeight, 'it came down to the ground on the way');
+  assert.equal(unit.y, target.y + GROUND.gunHeight);
+  assert.equal(unit.x, target.x);
+  assert.equal(unit.z, target.z);
+});
+
+test('a destroyed tower drops its platforms; the crew up there is thrown down and hurt', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 1, { azure: 0, ember: 0 });
+  toCombat(room, clock);
+  const unit = squad(room, 'azure').find((player) => player.role === 'ground')!;
+  const station = room.stations[unit.station];
+  const tower = room.towers.find((item) => item.id === station.towerId)!;
+  const attacker = squad(room, 'ember')[0];
+  tower.hp = 1;
+  room.projectiles.push({
+    id: 'shot', ownerId: attacker.id, team: 'ember', kind: 'cannon', x: tower.x + TOWER.radius * 3, y: TOWER.height * .3, z: tower.z, yaw: -Math.PI / 2, pitch: 0, speed: 3_000,
+    targetId: null, vx: -30_000, vy: 0, vz: 0, life: 1, damage: 50, turn: 0, age: 0,
+  } as never);
+  step(room, clock, 300);
+  assert.equal(tower.hp, 0);
+  for (const gun of room.stations.filter((item) => item.towerId === tower.id && item.kind === 'gun')) {
+    assert.equal(gun.mount, 'ground');
+    assert.equal(gun.y, 0);
+  }
+  assert.equal(unit.y, GROUND.gunHeight);
+  assert.equal(unit.hp, 100 - TOWER.collapseDamage);
+  assert.ok(attacker.damage >= TOWER.collapseDamage, 'credited to whoever felled the tower');
+  const thrown = snapshotRoom(room, clock.now).events.find((event) => event.type === 'collapse');
+  assert.equal(thrown?.ownerId, unit.id, 'a collapse event tells the crew (for the sound and banner)');
+});
+
+test('the Weapons Tower fires from the mount nearest the target\'s height', () => {
+  const { room, clock } = fullRoom();
+  jumpTo(room, clock, 1, { azure: 0, ember: 0 });
+  toCombat(room, clock);
+  const weapons = room.towers.find((tower) => tower.kind === 'weapons')!;
+  const jet = squad(room, 'ember')[0];
+  for (const [height, mount] of [[TOWER.weaponsMounts[0] - 100, TOWER.weaponsMounts[0]], [TOWER.weaponsMounts[2] + 400, TOWER.weaponsMounts[2]]]) {
+    room.projectiles = [];
+    for (const player of room.players.values()) if (player.role === 'pilot') { player.x = 0; player.z = 0; player.y = 9_000; }
+    jet.x = weapons.x + Math.sign(-weapons.x) * TOWER.weaponsRange * .5; jet.z = weapons.z; jet.y = height;
+    weapons.defenceReadyAt = 0;
+    stepTowers(room, clock.now);
+    const shell = room.projectiles.find((shot) => shot.ownerId === `tower:${weapons.id}`);
+    assert.ok(shell, 'it fired');
+    assert.equal(shell.y, mount);
+  }
+});
+
+console.log('Bots');
+
+function soloRoom() {
+  const clock = { now: 1_000_000 };
+  const room = createMatchRoom('BOTS', 'skyforge');
+  const human = addPlayer(room, { id: 'human', name: 'HUMAN', model: 'swift' }, clock.now);
+  return { room, clock, human };
+}
+
+test('a room takes at most nine bots (ten players, at least one person), only in the lobby', () => {
+  const empty = createMatchRoom('NOBODY', 'skyforge');
+  assert.equal(addBot(empty, 0), null, 'no bots without a person');
+  const { room, clock } = soloRoom();
+  manageBots(room, 'fill', clock.now);
+  assert.equal(room.players.size, MAX_PLAYERS);
+  assert.equal(botCount(room), 9);
+  assert.equal(teamCount(room, 'azure'), 5);
+  assert.equal(teamCount(room, 'ember'), 5);
+  assert.equal(addBot(room, clock.now), null);
+  assert.equal(new Set([...room.players.values()].map((player) => player.name)).size, 10, 'bot names are unique');
+  manageBots(room, 'remove', clock.now, 'azure');
+  assert.equal(teamCount(room, 'azure'), 4);
+  assert.equal(addBot(room, clock.now, 'ember'), null, 'a full team takes no more');
+  manageBots(room, 'clear', clock.now);
+  assert.equal(botCount(room), 0);
+  assert.equal(room.players.size, 1);
+  manageBots(room, 'add', clock.now);
+  room.phase = 'active';
+  assert.equal(addBot(room, clock.now), null, 'not once the match is running');
+  assert.equal(removeBot(room), false);
+});
+
+test('a person joining a lobby full of bots takes a bot\'s seat', () => {
+  const { room, clock } = soloRoom();
+  manageBots(room, 'fill', clock.now);
+  assert.equal(isFull(room), true);
+  assert.equal(hasSeatForHuman(room), true);
+  makeRoomForHuman(room);
+  const guest = addPlayer(room, { id: 'guest', name: 'GUEST', model: 'swift' }, clock.now);
+  assert.equal(room.players.size, MAX_PLAYERS);
+  assert.equal(botCount(room), 8);
+  assert.equal(teamCount(room, guest.team), 5);
+  room.phase = 'active';
+  assert.equal(hasSeatForHuman(room), false, 'bots keep their seats mid-match');
+});
+
+test('bots play a whole match: they fight, attack and repair towers, and finish it', () => {
+  const { room, clock, human } = soloRoom();
+  manageBots(room, 'fill', clock.now);
+  // Every round must end on its own (time at the latest); allow for a few overtimes.
+  until(room, clock, () => {
+    human.input = { pitch: 0, yaw: 0, roll: 0, throttle: 0, boost: false, airBrake: false, primary: false, secondary: false };
+    return room.phase === 'complete';
+  }, 14 * 7 * 60_000);
+  const bots = [...room.players.values()].filter((player) => player.bot);
+  assert.ok(room.matchWinner, 'someone won');
+  assert.ok(bots.reduce((sum, bot) => sum + bot.kills, 0) > 0, 'bots shot each other down');
+  assert.ok(bots.reduce((sum, bot) => sum + bot.towerDamage, 0) > 0, 'bots damaged towers');
+  assert.ok(bots.reduce((sum, bot) => sum + bot.repaired, 0) > 0, 'bot ground crews repaired');
+  assert.ok([...room.players.values()].every((player) => Number.isFinite(player.x + player.y + player.z + player.hp)));
+});
+
+test('offline bot match: chosen teammates and opponents, full match rules', () => {
+  const session = createBotMatchSession('ME', 'skyforge', 'swift', 2, 5);
+  assert.equal(session.kind, 'bots');
+  assert.equal(teamCount(session.room, 'azure'), 3);
+  assert.equal(teamCount(session.room, 'ember'), 5);
+  const capped = createBotMatchSession('ME', 'skyforge', 'swift', 99, 99);
+  assert.equal(botCount(capped.room), 9);
+  let now = Date.now();
+  const end = now + LOBBY_MS + PREP_MS + COUNTDOWN_MS + 5_000;
+  while (session.room.phase !== 'active' && now < end) { now += TICK_MS; stepTraining(session, session.room.players.get(TRAINING_PLAYER_ID)!.input, TICK_MS / 1_000, now); }
+  assert.equal(session.room.phase, 'active');
+  assert.equal(session.state.roundKind, 'towers');
+  assert.equal(session.room.round, 1);
 });
 
 console.log(`\n${passed} passed, ${failures.length} failed`);

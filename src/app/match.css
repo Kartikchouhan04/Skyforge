@@ -300,3 +300,69 @@
   .sudden-death-card { top: 22%; }
   .zone-warning { white-space: normal; width: min(92vw, 420px); text-align: center; }
 }
+
+/* Section 12 HUD: alive counts, match point, kill feed, unit status, monitoring. */
+.score-team > span { display: flex; flex-direction: column; gap: 3px; }
+.score-team.ember-text > span { align-items: flex-end; }
+.alive-pips { display: flex; align-items: center; gap: 3px; }
+.alive-pips i { width: 7px; height: 7px; border: 1px solid currentColor; opacity: .9; }
+.alive-pips i.up { background: currentColor; }
+.alive-pips i.down { opacity: .45; background: transparent; }
+.alive-pips i.empty { opacity: .15; border-style: dashed; }
+.alive-pips span { margin-left: 4px; color: #c9d6de; font: 700 10px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.08em; }
+.match-point-tag { align-self: flex-start; padding: 1px 5px; background: #ffb54a; color: #1c1206; font: 800 10px 'Barlow', 'Segoe UI', system-ui, sans-serif; font-style: normal; letter-spacing: 0.1em; animation: match-point-pulse 1.4s ease-in-out infinite; }
+.score-team.ember-text .match-point-tag { align-self: flex-end; }
+@keyframes match-point-pulse { 50% { box-shadow: 0 0 12px rgba(255, 181, 74, .8); } }
+.round-card-match-point { color: #ffb54a; font: 800 14px 'Barlow Condensed', 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.14em; }
+
+.kill-feed { position: absolute; z-index: 3; top: 92px; right: 272px; display: flex; flex-direction: column; align-items: flex-end; gap: 4px; pointer-events: none; }
+.kill-line { display: flex; align-items: center; gap: 8px; padding: 5px 9px; background: rgba(6, 11, 19, .7); border-right: 2px solid rgba(255, 255, 255, .25); font: 700 12px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.05em; animation: kill-line-life 9s ease-out forwards; }
+.kill-line.mine { border-right-color: #ffb54a; background: rgba(40, 26, 6, .78); }
+.kill-line i { color: #e5f0f4; font-style: normal; font-size: 11px; }
+.kill-line span { font-size: 11px; }
+@keyframes kill-line-life { 0% { opacity: 0; transform: translateX(12px); } 4%, 85% { opacity: 1; transform: none; } 100% { opacity: 0; } }
+
+.self-health .unit-status { min-width: 70px; color: #9fb2bf; font: 700 10px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.1em; }
+.self-health.damaged .unit-status { color: #f1be66; }
+.self-health.critical .unit-status { color: #ff5b4d; animation: flight-warning-blink .6s steps(2, start) infinite; }
+.weapon-readout .missile-count { color: #eef6f9; font-style: normal; font-weight: 700; }
+.spectator-note .spectator-hint { color: #8fa3b0; font-size: .9em; }
+
+.results-table tr.is-departed td { opacity: .6; }
+.results-table .left-tag { margin-left: 6px; padding: 0 4px; border: 1px solid #8796a3; color: #8796a3; font-style: normal; font-size: 10px; }
+.quick-match-button { margin-top: 8px; background: linear-gradient(90deg, #ffb54a, #ff8a3d) !important; color: #1c1206 !important; }
+
+.perf-overlay { position: absolute; z-index: 6; top: 92px; left: 272px; display: flex; flex-direction: column; gap: 2px; padding: 7px 10px; background: rgba(4, 8, 14, .82); border: 1px solid rgba(101, 223, 255, .3); color: #8fa3b0; font: 11px ui-monospace, 'Cascadia Mono', Consolas, monospace; pointer-events: none; }
+.perf-overlay b { color: #d7f17b; font-weight: 700; }
+.perf-overlay b.perf-bad { color: #ff5b4d; }
+
+@media (max-width: 760px) {
+  .kill-feed { top: 64px; right: 8px; }
+  .kill-line { font-size: 10px; padding: 3px 6px; }
+  .perf-overlay { top: 64px; left: 8px; }
+  .alive-pips span { display: none; }
+}
+
+/* Lobby bot controls. */
+.bot-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 6px; margin-top: 4px; }
+.bot-controls em { margin-right: 4px; color: #8797a3; font: 11px 'Barlow', 'Segoe UI', system-ui, sans-serif; font-style: normal; letter-spacing: 0.05em; }
+.bot-controls .bot-team { display: inline-flex; align-items: center; gap: 3px; padding: 0 6px; border-left: 1px solid rgba(196, 218, 232, .18); }
+.bot-controls .bot-team b { margin-right: 3px; font: 700 11px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.05em; }
+.bot-controls button { height: 26px; min-width: 26px; padding: 0 9px; border: 1px solid rgba(196, 218, 232, .22); background: rgba(10, 20, 30, .8); color: #d5e4ec; font: 700 11px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.05em; cursor: pointer; }
+.bot-controls button:hover:not(:disabled) { border-color: #7fe3ff; color: #eaf9ff; }
+.bot-controls button:disabled { opacity: .35; cursor: default; }
+
+/* Training dialog: bot match size. */
+.drill-select { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 760px) { .drill-select { grid-template-columns: 1fr; } }
+.bot-count-select { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin: 8px 0 4px; padding: 8px 12px; border: 1px solid rgba(196, 218, 232, .18); background: rgba(10, 20, 30, .6); }
+.bot-count-select span { display: inline-flex; align-items: center; gap: 6px; font: 700 11px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.08em; }
+.bot-count-select b { min-width: 16px; color: #eef6f9; text-align: center; font-size: 15px; }
+.bot-count-select button { width: 26px; height: 26px; border: 1px solid rgba(196, 218, 232, .25); background: rgba(10, 20, 30, .85); color: #d5e4ec; font: 700 13px 'Barlow', 'Segoe UI', system-ui, sans-serif; cursor: pointer; }
+.bot-count-select button:disabled { opacity: .35; cursor: default; }
+.bot-count-select small { margin-left: auto; color: #8797a3; font: 700 11px 'Barlow', 'Segoe UI', system-ui, sans-serif; letter-spacing: 0.08em; }
+
+/* Audio toggles: the hangar's MUSIC switch sits beside HOW IT WORKS. */
+.launch-links { display: flex; align-items: center; gap: 22px; }
+.music-toggle { padding: 0; border: 0; background: none; cursor: pointer; }
+.music-toggle[aria-pressed="true"] span { color: #7d8b97; }

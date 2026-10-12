@@ -20,6 +20,10 @@ export const COMBAT_COUNTDOWN_SECONDS = 5;
 export const LOBBY_SECONDS = 10;
 /** Round 11, Sudden Death: a shorter all-jet round with a shrinking safe zone. */
 export const TIEBREAKER_SECONDS = 3 * 60;
+/** Teams one round win from taking the match. */
+export function matchPointTeams(wins: Record<'azure' | 'ember', number>) {
+  return (['azure', 'ember'] as const).filter((team) => wins[team] === WINS_NEEDED - 1);
+}
 /** Defending side in a tower round: two jets, the rest on the ground. */
 export const DEFENDER_PILOTS = 2;
 export const DEFENDER_GROUND = 3;
@@ -137,6 +141,8 @@ export const COMBAT = {
   missileDrop: .22,
   /** Missile reload, seconds. */
   missileReload: 5,
+  /** Missiles each jet carries per round (practice refills). */
+  missileCapacity: 6,
   missileDamage: 165,
 } as const;
 
@@ -167,8 +173,26 @@ export const TOWER = {
   weaponsInterval: .34,
   weaponsCrewedInterval: .18,
   weaponsDamage: 6,
+  /**
+   * The Weapons Tower's automated flak mounts, by height: two sponsons on the
+   * shaft and the crown turret. Each burst comes from the mount nearest the
+   * target's altitude, so low attackers are met from low down.
+   */
+  weaponsMounts: [24 * A, 40 * A, 72 * A * .95],
   /** Radar Tower: attackers inside this range are shown to every defender. */
   radarRange: 560 * A,
+  /**
+   * Crew gun positions on each tower (heights and distances from its axis):
+   * one on the upper deck, one on a balcony bolted to the shaft. Crews ride a
+   * lift down to the access point at the foot of the tower to drive anywhere.
+   */
+  deckHeight: 49.3 * A,
+  deckRadius: 15 * A,
+  balconyHeight: 32 * A,
+  balconyRadius: 19 * A,
+  accessRadius: 32 * A,
+  /** Crew thrown down when their tower falls: damage taken. */
+  collapseDamage: 30,
 } as const;
 
 /** Ground defenders: crewed anti-aircraft units that drive between defensive stations. */
@@ -239,25 +263,42 @@ export function towerLayout(defender: Team) {
     { kind: 'radar', x: 250, z: 185 },
   ];
   const towers = spots.map(({ kind, x, z }) => ({ id: `tower-${kind}`, kind, label: TOWER_NAMES[kind], team: defender, x: side * x * A, z: z * A }));
-  // Two gun stations per tower on its centre-facing side (1–6), and one
-  // repair pad behind each tower (7–9).
-  const guns = spots.flatMap(({ kind, x, z }, towerIndex) => [-1, 1].map((offset, sideIndex) => ({
-    id: `station-${towerIndex * 2 + sideIndex + 1}`,
-    index: towerIndex * 2 + sideIndex,
-    kind: 'gun' as const,
-    team: defender,
-    towerId: `tower-${kind}`,
-    x: side * (x - 40) * A,
-    z: (z + offset * 30) * A,
-  })));
+  // Two gun stations on each tower (1–6), on its centre-facing side: the
+  // upper deck first, then the shaft balcony. One repair pad behind each
+  // tower, on the ground (7–9).
+  const guns = spots.flatMap(({ kind, x, z }, towerIndex) => {
+    const towerX = side * x * A; const towerZ = z * A;
+    const toCentre = Math.atan2(-towerX, -towerZ);
+    return (['deck', 'balcony'] as const).map((mount, sideIndex) => {
+      const angle = toCentre + (sideIndex ? .5 : -.5);
+      const radius = mount === 'deck' ? TOWER.deckRadius : TOWER.balconyRadius;
+      return {
+        id: `station-${towerIndex * 2 + sideIndex + 1}`,
+        index: towerIndex * 2 + sideIndex,
+        kind: 'gun' as const,
+        mount: mount as StationMount,
+        team: defender,
+        towerId: `tower-${kind}`,
+        x: towerX + Math.sin(angle) * radius,
+        y: mount === 'deck' ? TOWER.deckHeight : TOWER.balconyHeight,
+        z: towerZ + Math.cos(angle) * radius,
+        baseX: towerX + Math.sin(angle) * TOWER.accessRadius,
+        baseZ: towerZ + Math.cos(angle) * TOWER.accessRadius,
+      };
+    });
+  });
   const pads = spots.map(({ kind, x, z }, towerIndex) => ({
     id: `repair-${kind}`,
     index: 6 + towerIndex,
     kind: 'repair' as const,
+    mount: 'ground' as StationMount,
     team: defender,
     towerId: `tower-${kind}`,
     x: side * (x + 50) * A,
+    y: 0,
     z: z * A,
+    baseX: side * (x + 50) * A,
+    baseZ: z * A,
   }));
   return { towers, stations: [...guns, ...pads] };
 }
@@ -274,6 +315,8 @@ export const PROJECTILE_SPEED: Record<ProjectileKind, number> = {
 export type JetState = {
   id: string;
   name: string;
+  /** Controlled by the server's AI (bots.ts), not a person. */
+  bot: boolean;
   team: Team;
   model: JetModel;
   role: Role;
@@ -292,6 +335,8 @@ export type JetState = {
   deaths: number;
   /** Seconds until the missile (pilot) or SAM (ground) is ready again. */
   missileCooldown: number;
+  /** Pilot: missiles left this round. */
+  missileAmmo: number;
   targetId: string | null;
   /** Orientation quaternion [x, y, z, w]. yaw/pitch/roll are derived from it. */
   q: [number, number, number, number];
@@ -347,15 +392,24 @@ export type TowerState = {
   barrier: number;
 };
 
+/** Where a station stands: on a tower's upper deck, on its shaft balcony, or on the ground. */
+export type StationMount = 'deck' | 'balcony' | 'ground';
+
 export type StationState = {
   id: string;
   index: number;
   /** Gun stations hold the line; repair pads are where towers get patched. */
   kind: 'gun' | 'repair';
+  mount: StationMount;
   team: Team;
   towerId: string;
+  /** The emplacement: y is the floor the unit stands on (0 on the ground). */
   x: number;
+  y: number;
   z: number;
+  /** Ground access point at the foot of the tower (the lift); the station itself for ground stations. */
+  baseX: number;
+  baseZ: number;
   occupantId: string | null;
 };
 
@@ -390,7 +444,7 @@ export type ZoneState = {
 
 export type CombatEvent = {
   id: string;
-  type: 'jet-hit' | 'jet-down' | 'tower-hit' | 'tower-critical' | 'tower-down' | 'repair' | 'repair-interrupted' | 'barrier' | 'prep' | 'round-start' | 'round-end' | 'match-end' | 'boundary' | 'sides' | 'zone';
+  type: 'jet-hit' | 'jet-down' | 'tower-hit' | 'tower-critical' | 'tower-down' | 'repair' | 'repair-interrupted' | 'barrier' | 'prep' | 'round-start' | 'round-end' | 'match-end' | 'boundary' | 'sides' | 'zone' | 'match-point' | 'collapse';
   text: string;
   team?: Team;
   ownerId?: string;
@@ -438,6 +492,8 @@ export type RoomState = {
   /** The Sudden Death safe zone; null outside Round 11. */
   zone: ZoneState | null;
   history: RoundRecord[];
+  /** Players who left mid-match, kept for the final scoreboard; only filled once the match is complete. */
+  departed: JetState[];
   events: CombatEvent[];
 };
 
@@ -462,13 +518,26 @@ export type PlayerInput = {
 };
 
 export type ClientMessage =
-  | { type: 'join'; room: string; name: string; arenaId?: ArenaId; jetModel?: JetModel; role?: RolePreference }
+  /** `quick` asks the server to matchmake: join an open room, or open a new one. `room` is then ignored. */
+  | { type: 'join'; room: string; name: string; arenaId?: ArenaId; jetModel?: JetModel; role?: RolePreference; quick?: boolean }
   | ({ type: 'input' } & PlayerInput)
   | { type: 'preference'; role: RolePreference }
   /** Equipment for the coming round: airframe for pilots, loadout for ground crews. */
-  | { type: 'equip'; model?: JetModel; loadout?: GroundLoadout };
+  | { type: 'equip'; model?: JetModel; loadout?: GroundLoadout }
+  /** Latency probe: the server echoes `t` straight back. */
+  | { type: 'ping'; t: number }
+  /** A client-side crash or error, for the server log. */
+  | { type: 'report'; message: string }
+  /** Lobby only: add a bot (to a team, or the smaller one), remove one, fill every free seat, or remove them all. */
+  | { type: 'bots'; action: BotAction; team?: Team };
+
+export type BotAction = 'add' | 'remove' | 'fill' | 'clear';
+
+/** Server health sent with every pong, for the performance overlay. Tick times are the last few seconds' average and worst. */
+export type ServerPerf = { tickMs: number; tickMaxMs: number; rooms: number; crashes: number };
 
 export type ServerMessage =
   | { type: 'joined'; id: string; room: string; team: Team; arenaId: ArenaId }
   | RoomState
+  | { type: 'pong'; t: number; perf: ServerPerf }
   | { type: 'error'; message: string };

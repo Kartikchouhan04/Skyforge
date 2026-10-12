@@ -1,10 +1,11 @@
 import {
-  ARENA, ARENA_SCALE, COMBAT, FLIGHT_SCALE, GRAVITY, METERS_PER_UNIT, COMBAT_COUNTDOWN_SECONDS, DEFENDER_PILOTS, GROUND, GROUND_LOADOUTS, LOBBY_SECONDS, MAX_ROUNDS, MAX_TEAM_SIZE, PREP_SECONDS,
-  PROJECTILE_SPEED, REGULATION_ROUNDS, ROUNDS_PER_HALF, ROUND_SECONDS, SUDDEN_DEATH, TEAM_NAMES, TIEBREAKER_SECONDS, TOWER, WINS_NEEDED, otherTeam, towerLayout,
+  ARENA, ARENA_SCALE, COMBAT, FLIGHT_SCALE, GRAVITY, METERS_PER_UNIT, COMBAT_COUNTDOWN_SECONDS, DEFENDER_PILOTS, GROUND, GROUND_LOADOUTS, LOBBY_SECONDS, MAX_PLAYERS, MAX_ROUNDS, MAX_TEAM_SIZE, PREP_SECONDS,
+  PROJECTILE_SPEED, REGULATION_ROUNDS, ROUNDS_PER_HALF, ROUND_SECONDS, SUDDEN_DEATH, TEAM_NAMES, TIEBREAKER_SECONDS, TOWER, WINS_NEEDED, matchPointTeams, otherTeam, towerLayout,
   type ArenaId, type CombatEvent, type GroundLoadout, type JetModel, type JetState, type MatchPhase, type PlayerInput, type ProjectileKind, type ProjectileState,
   type Role, type RolePreference, type RoomState, type RoundKind, type RoundRecord, type StationState, type Team, type TowerState, type ZoneState,
 } from './protocol';
 import { initFlight, noseOf, stepFlight } from './flight';
+import { driveBots, type BotBrain } from './bots';
 
 /**
  * The authoritative Skyforge Stadium match: roles, the three strategic
@@ -37,9 +38,11 @@ export type MatchPlayer = JetState & {
   zoneAlertAt: number;
   /** Which wing pylon the next missile comes off. */
   pylon: number;
-  transitFrom: { x: number; z: number };
-  transitTo: { x: number; z: number };
+  /** Where a move between stations started: the emplacement, and the lift at its foot. */
+  transitFrom: { x: number; y: number; z: number; baseX: number; baseZ: number };
   transitTotal: number;
+  /** Bots only: the AI's memory between ticks. */
+  brain?: BotBrain;
 };
 
 type MatchProjectile = ProjectileState & { vx: number; vy: number; vz: number; life: number; damage: number; turn: number; age: number; losYaw?: number; losPitch?: number };
@@ -86,6 +89,8 @@ export type MatchRoom = {
   combatStartedAt: number;
   zoneWarned: boolean;
   audit: RoundAudit[];
+  /** Final stats of players who left mid-match, for the results screen. */
+  departed: JetState[];
 };
 
 const NEUTRAL_INPUT: PlayerInput = { pitch: 0, yaw: 0, roll: 0, throttle: 0, boost: false, airBrake: false, primary: false, secondary: false };
@@ -113,7 +118,7 @@ export function createMatchRoom(code: string, arenaId: ArenaId, practice = false
     players: new Map(), towers: [], stations: [], projectiles: [],
     roundWins: { azure: 0, ember: 0 }, roundWinner: null, matchWinner: null, history: [],
     lobbyStartsAt: 0, prepEndsAt: 0, countdownAt: 0, intermissionAt: 0, roundEndsAt: 0, resultsUntil: 0, events: [], sequence: 0, joins: 0,
-    tick: 0, combatStartedAt: 0, zoneWarned: false, audit: [],
+    tick: 0, combatStartedAt: 0, zoneWarned: false, audit: [], departed: [],
   };
 }
 
@@ -147,19 +152,19 @@ export function spawnPoint(team: Team, slot: number) {
   return { x: side * (345 + Math.floor(slot / 6) * 25) * ARENA_SCALE, y: (100 + (slot % 3) * 32) * ARENA_SCALE, z: (field * 145 + lane * 34) * ARENA_SCALE, yaw, pitch: 0, roll: 0, speed: COMBAT.spawnSpeed };
 }
 
-export function addPlayer(room: MatchRoom, options: { id: string; name: string; model: JetModel; preference?: RolePreference; team?: Team; loadout?: GroundLoadout }, now: number) {
+export function addPlayer(room: MatchRoom, options: { id: string; name: string; model: JetModel; preference?: RolePreference; team?: Team; loadout?: GroundLoadout; bot?: boolean }, now: number) {
   const team: Team = options.team ?? (teamCount(room, 'azure') <= teamCount(room, 'ember') ? 'azure' : 'ember');
   const point = spawnPoint(team, teamCount(room, team));
   const player: MatchPlayer = {
-    id: options.id, name: options.name, team, model: options.model, role: 'pilot', ...point,
-    hp: 100, alive: true, kills: 0, deaths: 0, missileCooldown: 0, targetId: null,
+    id: options.id, name: options.name, bot: options.bot ?? false, team, model: options.model, role: 'pilot', ...point,
+    hp: 100, alive: true, kills: 0, deaths: 0, missileCooldown: 0, missileAmmo: COMBAT.missileCapacity, targetId: null,
     q: [0, 0, 0, 1], throttle: .75, gLoad: 1, rollRate: 0, stall: false, gcas: false, burner: false,
     station: -1, transit: 0, repairCharges: 0, repairCooldown: 0, repairProgress: 0,
     loadout: options.loadout ?? 'balanced', flakAmmo: 0, samAmmo: 0, barrierCooldown: 0,
     spotted: false, damage: 0, towerDamage: 0, repaired: 0,
     input: { ...NEUTRAL_INPUT }, preference: options.preference ?? 'any', joinOrder: room.joins++,
     cannonReadyAt: 0, missileReadyAt: 0, repairReadyAt: 0, barrierReadyAt: 0, repairLatch: false, boundaryAlertAt: 0, zoneAlertAt: 0, pylon: 1,
-    transitFrom: { x: 0, z: 0 }, transitTo: { x: 0, z: 0 }, transitTotal: 0,
+    transitFrom: { x: 0, y: 0, z: 0, baseX: 0, baseZ: 0 }, transitTotal: 0,
   };
   initFlight(player, point.yaw);
   room.players.set(player.id, player);
@@ -178,6 +183,8 @@ export function removePlayer(room: MatchRoom, id: string) {
   if (!player) return;
   releaseStation(room, player);
   room.players.delete(id);
+  // Their part in the match still belongs on the final scoreboard.
+  if (!room.practice && room.phase !== 'lobby') room.departed.push({ ...publicPlayer(player), alive: false });
 }
 
 export function setInput(room: MatchRoom, id: string, input: PlayerInput) {
@@ -220,7 +227,7 @@ export function deployPlayer(room: MatchRoom, player: MatchPlayer, role: Role, s
   releaseStation(room, player);
   const loadout = GROUND_LOADOUTS[player.loadout] ?? GROUND_LOADOUTS.balanced;
   Object.assign(player, {
-    role, hp: 100, alive: true, missileCooldown: 0, targetId: null, input: { ...NEUTRAL_INPUT },
+    role, hp: 100, alive: true, missileCooldown: 0, missileAmmo: role === 'pilot' ? COMBAT.missileCapacity : 0, targetId: null, input: { ...NEUTRAL_INPUT },
     cannonReadyAt: 0, missileReadyAt: 0, repairReadyAt: 0, barrierReadyAt: 0, repairLatch: false, repairProgress: 0,
     transit: 0, transitTotal: 0, station: -1, spotted: false,
     repairCharges: role === 'ground' ? TOWER.repairCharges : 0, repairCooldown: 0, barrierCooldown: 0,
@@ -244,7 +251,7 @@ export function deployPlayer(room: MatchRoom, player: MatchPlayer, role: Role, s
 
 function placeAtStation(player: MatchPlayer, station: StationState) {
   station.occupantId = player.id;
-  Object.assign(player, { station: station.index, x: station.x, y: GROUND.gunHeight, z: station.z, transit: 0, transitTotal: 0, repairProgress: 0 });
+  Object.assign(player, { station: station.index, x: station.x, y: station.y + GROUND.gunHeight, z: station.z, transit: 0, transitTotal: 0, repairProgress: 0 });
 }
 
 /** Someone joining during preparation: fill whatever the squad is short of. */
@@ -287,9 +294,9 @@ function setUpRound(room: MatchRoom, now: number) {
       continue;
     }
     // Defenders: those who asked to fly get the jets first, those who asked
-    // for the ground last; join order breaks ties.
+    // for the ground last; people before bots, then join order.
     const rank = (player: MatchPlayer) => player.preference === 'pilot' ? 0 : player.preference === 'any' ? 1 : 2;
-    const ordered = [...squad].sort((a, b) => rank(a) - rank(b) || byJoin(a, b));
+    const ordered = [...squad].sort((a, b) => rank(a) - rank(b) || Number(a.bot) - Number(b.bot) || byJoin(a, b));
     const pilots = defenderPilotCount(squad.length);
     let groundIndex = 0;
     ordered.forEach((player, index) => {
@@ -301,6 +308,23 @@ function setUpRound(room: MatchRoom, now: number) {
   emit(room, 'prep', defender
     ? `${label} — PREPARE · ${TEAM_NAMES[otherTeam(defender)]} ATTACKS · ${TEAM_NAMES[defender]} DEFENDS`
     : `${label} — SUDDEN DEATH · ALL JETS · LAST SQUADRON FLYING WINS`, { round: room.round });
+  // Round 11 has its own Sudden Death announcement; before it, one team at a time can be on match point.
+  const onPoint = defender ? matchPointTeams(room.roundWins) : [];
+  for (const team of onPoint) emit(room, 'match-point', `MATCH POINT — ${TEAM_NAMES[team]} IS ONE ROUND FROM VICTORY`, { team, round: room.round });
+}
+
+/**
+ * What follows a decided round: a team on six wins the match; a draw is
+ * replayed; 5–5 after round 10 goes to Sudden Death; otherwise the next
+ * round. `roundWins` already includes this round's point.
+ */
+export type RoundOutcome = 'match-end' | 'replay' | 'sudden-death' | 'next-round';
+export function decideAfterRound(round: number, roundWins: Record<Team, number>, winner: Team | null): RoundOutcome {
+  if (!winner) return 'replay';
+  if (roundWins[winner] >= WINS_NEEDED || round >= MAX_ROUNDS) return 'match-end';
+  // Ten decided rounds with nobody on six can only be 5–5.
+  if (round >= REGULATION_ROUNDS) return 'sudden-death';
+  return 'next-round';
 }
 
 function beginCombat(room: MatchRoom, now: number) {
@@ -329,21 +353,22 @@ function endRound(room: MatchRoom, winner: Team | null, reason: string, now: num
     emit(room, 'round-end', sudden ? `SUDDEN DEATH DRAWN — ${reason} · OVERTIME ${room.overtime + 1}` : `ROUND ${room.round} DRAWN — ${reason} · REPLAYING`, { round: room.round });
   }
   const leader = room.roundWins.azure > room.roundWins.ember ? 'azure' : room.roundWins.ember > room.roundWins.azure ? 'ember' : null;
-  if ((winner && room.roundWins[winner] >= WINS_NEEDED) || (winner && room.round >= MAX_ROUNDS)) {
+  const outcome = decideAfterRound(room.round, room.roundWins, winner);
+  if (outcome === 'match-end') {
     room.phase = 'complete';
     room.matchWinner = winner && room.roundWins[winner] >= WINS_NEEDED ? winner : leader;
     room.resultsUntil = now + RESULTS_HOLD_MS;
-    emit(room, 'match-end', room.matchWinner ? `${TEAM_NAMES[room.matchWinner]} WINS THE MATCH ${room.roundWins[room.matchWinner]}–${room.roundWins[otherTeam(room.matchWinner)]}` : 'MATCH DRAWN');
+    emit(room, 'match-end', room.matchWinner ? `${TEAM_NAMES[room.matchWinner]} WINS THE MATCH ${room.roundWins[room.matchWinner]}–${room.roundWins[otherTeam(room.matchWinner)]}` : 'MATCH DRAWN', room.matchWinner ? { team: room.matchWinner } : {});
     return;
   }
-  room.nextRound = winner ? room.round + 1 : room.round;
-  room.nextOvertime = winner ? 0 : room.overtime + 1;
+  room.nextRound = outcome === 'replay' ? room.round : room.round + 1;
+  room.nextOvertime = outcome === 'replay' ? room.overtime + 1 : 0;
   room.phase = 'intermission';
   let pause = INTERMISSION_MS;
-  if (room.nextRound !== room.round && room.nextRound === ROUNDS_PER_HALF + 1) {
+  if (outcome === 'next-round' && room.nextRound === ROUNDS_PER_HALF + 1) {
     pause = SWITCH_INTERMISSION_MS;
     emit(room, 'sides', `SIDES SWITCH — ${TEAM_NAMES.ember} NOW DEFENDS THE TOWERS`);
-  } else if (room.nextRound !== room.round && room.nextRound === MAX_ROUNDS) {
+  } else if (outcome === 'sudden-death') {
     pause = SWITCH_INTERMISSION_MS;
     emit(room, 'sides', `${room.roundWins.azure}–${room.roundWins.ember} — ROUND 11 · SUDDEN DEATH`);
   }
@@ -354,7 +379,7 @@ export function resetToLobby(room: MatchRoom) {
   Object.assign(room, {
     phase: 'lobby', round: 0, overtime: 0, nextRound: 1, nextOvertime: 0, roundKind: 'towers', defender: null,
     towers: [], stations: [], projectiles: [], roundWins: { azure: 0, ember: 0 }, roundWinner: null, matchWinner: null, history: [],
-    lobbyStartsAt: 0, prepEndsAt: 0, countdownAt: 0, intermissionAt: 0, roundEndsAt: 0, resultsUntil: 0, combatStartedAt: 0, zoneWarned: false,
+    lobbyStartsAt: 0, prepEndsAt: 0, countdownAt: 0, intermissionAt: 0, roundEndsAt: 0, resultsUntil: 0, combatStartedAt: 0, zoneWarned: false, departed: [],
   });
   const slots: Record<Team, number> = { azure: 0, ember: 0 };
   for (const player of room.players.values()) {
@@ -428,6 +453,7 @@ function damageTower(room: MatchRoom, tower: MatchTower, amount: number, ownerId
   if (tower.hp === 0) {
     tower.barrierUntil = 0;
     emit(room, 'tower-down', `${DESTROYED_TEXT[tower.kind]} · ${ownerName(room, ownerId)}`, { team, ownerId, targetId: tower.id, x: tower.x, y: TOWER.height * .7, z: tower.z });
+    collapseStations(room, tower, ownerId, team);
     return;
   }
   const critical = tower.maxHp * TOWER.critical;
@@ -439,6 +465,24 @@ function damageTower(room: MatchRoom, tower: MatchTower, amount: number, ownerId
   const step = tower.maxHp / 10;
   if (Math.floor(before / step) !== Math.floor(tower.hp / step)) {
     emit(room, 'tower-hit', `${tower.label} TOWER UNDER ATTACK — ${Math.ceil(tower.hp / tower.maxHp * 100)}%`, { team, ownerId, targetId: tower.id, x: at.x, y: at.y, z: at.z });
+  }
+}
+
+/**
+ * A destroyed tower takes its deck and balcony with it. Its gun stations drop
+ * to emplacements on the ground at the foot of the stump, and any crew up
+ * there is thrown down with them and hurt (credited to whoever felled it).
+ */
+function collapseStations(room: MatchRoom, tower: MatchTower, ownerId: string, team: Team) {
+  for (const station of room.stations) {
+    if (station.towerId !== tower.id || station.mount === 'ground') continue;
+    Object.assign(station, { mount: 'ground', x: station.baseX, y: 0, z: station.baseZ });
+    const crew = occupantOf(room, station);
+    if (!crew || crew.transit > 0) continue;
+    interruptRepair(room, crew, '— TOWER COLLAPSED');
+    emit(room, 'collapse', `${crew.name} THROWN FROM THE ${tower.label} TOWER`, { team: crew.team, ownerId: crew.id, targetId: tower.id, x: crew.x, y: crew.y, z: crew.z });
+    placeAtStation(crew, station);
+    damagePlayer(room, crew, TOWER.collapseDamage, ownerId, team);
   }
 }
 
@@ -576,7 +620,9 @@ function stepPilot(room: MatchRoom, jet: MatchPlayer, now: number, dt: number) {
   }
   // RMB always launches, alternating wing pylons. With a lock the missile
   // guides onto it; without one it flies dead straight. Then a reload.
-  if (jet.input.secondary && now >= jet.missileReadyAt) {
+  if (room.practice && jet.missileAmmo <= 0) jet.missileAmmo = COMBAT.missileCapacity;
+  if (jet.input.secondary && now >= jet.missileReadyAt && jet.missileAmmo > 0) {
+    jet.missileAmmo -= 1;
     const side = jet.pylon; jet.pylon = -jet.pylon;
     // Right vector in this world is (-cos yaw, 0, sin yaw).
     const pylon = { x: jet.x - Math.cos(jet.yaw) * side * 5 * FLIGHT_SCALE + nose[0] * 2 * FLIGHT_SCALE, y: jet.y - 1.6 * FLIGHT_SCALE, z: jet.z + Math.sin(jet.yaw) * side * 5 * FLIGHT_SCALE + nose[2] * 2 * FLIGHT_SCALE };
@@ -592,10 +638,10 @@ function startDrive(room: MatchRoom, unit: MatchPlayer, station: StationState, i
   unit.repairProgress = 0;
   unit.targetId = null;
   if (instant) { placeAtStation(unit, station); return; }
+  const from = room.stations[unit.station];
   station.occupantId = unit.id;
-  unit.transitFrom = { x: unit.x, z: unit.z };
-  unit.transitTo = { x: station.x, z: station.z };
-  unit.transitTotal = GROUND.redeploy * 2 + Math.hypot(station.x - unit.x, station.z - unit.z) / GROUND.driveSpeed;
+  unit.transitFrom = { x: unit.x, y: unit.y, z: unit.z, baseX: from?.baseX ?? unit.x, baseZ: from?.baseZ ?? unit.z };
+  unit.transitTotal = GROUND.redeploy * 2 + Math.hypot(station.baseX - unit.transitFrom.baseX, station.baseZ - unit.transitFrom.baseZ) / GROUND.driveSpeed;
   unit.transit = unit.transitTotal;
   unit.station = station.index;
 }
@@ -639,13 +685,31 @@ function stepGround(room: MatchRoom, unit: MatchPlayer, now: number, dt: number)
   }
   if (unit.transit > 0) {
     unit.transit = Math.max(0, unit.transit - dt);
-    // Pack up, drive, then set up again.
+    // Pack up and ride the lift down, drive to the next tower's foot, ride up
+    // and set up. The destination is read live: its platform may have fallen.
+    const target = room.stations[unit.station];
+    const from = unit.transitFrom;
+    const elapsed = unit.transitTotal - unit.transit;
     const driving = Math.max(.0001, unit.transitTotal - GROUND.redeploy * 2);
-    const progress = clamp((unit.transitTotal - unit.transit - GROUND.redeploy) / driving, 0, 1);
-    const eased = progress * progress * (3 - 2 * progress);
-    unit.x = unit.transitFrom.x + (unit.transitTo.x - unit.transitFrom.x) * eased;
-    unit.z = unit.transitFrom.z + (unit.transitTo.z - unit.transitFrom.z) * eased;
-    unit.speed = progress > 0 && progress < 1 ? GROUND.driveSpeed : 0;
+    const ease = (t: number) => t * t * (3 - 2 * t);
+    if (elapsed < GROUND.redeploy) {
+      const t = ease(clamp(elapsed / GROUND.redeploy, 0, 1));
+      unit.x = from.x + (from.baseX - from.x) * t;
+      unit.y = from.y + (GROUND.gunHeight - from.y) * t;
+      unit.z = from.z + (from.baseZ - from.z) * t;
+    } else if (elapsed < GROUND.redeploy + driving) {
+      const t = ease(clamp((elapsed - GROUND.redeploy) / driving, 0, 1));
+      unit.x = from.baseX + (target.baseX - from.baseX) * t;
+      unit.y = GROUND.gunHeight;
+      unit.z = from.baseZ + (target.baseZ - from.baseZ) * t;
+    } else {
+      const t = ease(clamp((elapsed - GROUND.redeploy - driving) / GROUND.redeploy, 0, 1));
+      unit.x = target.baseX + (target.x - target.baseX) * t;
+      unit.y = GROUND.gunHeight + target.y * t;
+      unit.z = target.baseZ + (target.z - target.baseZ) * t;
+    }
+    if (unit.transit <= 0) placeAtStation(unit, target);
+    unit.speed = elapsed > GROUND.redeploy && elapsed < GROUND.redeploy + driving ? GROUND.driveSpeed : 0;
     updateCooldowns(unit, now);
     return;
   }
@@ -714,7 +778,7 @@ function stepGround(room: MatchRoom, unit: MatchPlayer, now: number, dt: number)
 }
 
 /** Tower state flags, and the Weapons Tower's automated, leading flak. */
-function stepTowers(room: MatchRoom, now: number) {
+export function stepTowers(room: MatchRoom, now: number) {
   const shieldUp = standing(room, 'shield');
   for (const tower of room.towers) {
     tower.crewed = tower.hp > 0 && room.stations.some((station) => {
@@ -725,15 +789,21 @@ function stepTowers(room: MatchRoom, now: number) {
     tower.shielded = tower.hp > 0 && tower.kind !== 'shield' && shieldUp;
     tower.barrier = tower.hp > 0 ? Math.max(0, (tower.barrierUntil - now) / 1_000) : 0;
     if (tower.kind !== 'weapons' || tower.hp <= 0 || now < tower.defenceReadyAt) continue;
-    const top = { x: tower.x, y: TOWER.height * .95, z: tower.z };
+    const centre = { x: tower.x, y: TOWER.height * .5, z: tower.z };
     let target: MatchPlayer | undefined;
-    let best: number = TOWER.weaponsRange;
+    let nearestRange: number = TOWER.weaponsRange;
     for (const jet of room.players.values()) {
       if (!jet.alive || jet.team === tower.team || jet.role !== 'pilot') continue;
-      const distance = Math.hypot(jet.x - top.x, jet.y - top.y, jet.z - top.z);
-      if (distance < best) { best = distance; target = jet; }
+      const distance = Math.hypot(jet.x - centre.x, jet.y - centre.y, jet.z - centre.z);
+      if (distance < nearestRange) { nearestRange = distance; target = jet; }
     }
     if (!target) continue;
+    // The mount nearest the target's height, on the side facing it.
+    const mountY = TOWER.weaponsMounts.reduce((bestY, y) => Math.abs(y - target.y) < Math.abs(bestY - target.y) ? y : bestY, TOWER.weaponsMounts[0]);
+    const outward = Math.atan2(target.x - tower.x, target.z - tower.z);
+    const reach = mountY > TOWER.deckHeight ? 0 : towerRadiusAt(tower, mountY) + 2 * ARENA_SCALE;
+    const top = { x: tower.x + Math.sin(outward) * reach, y: mountY, z: tower.z + Math.cos(outward) * reach };
+    const best = Math.hypot(target.x - top.x, target.y - top.y, target.z - top.z);
     const nose = noseOf(target);
     const lead = best / GROUND.flakSpeed;
     const aimX = target.x + nose[0] * target.speed * lead - top.x;
@@ -999,6 +1069,7 @@ export function stepMatch(room: MatchRoom, now: number, dt: number) {
       if (now >= room.countdownAt) beginCombat(room, now);
       break;
     case 'active':
+      driveBots(room, now, zoneAt(room, now));
       stepCombat(room, now, dt);
       stepZone(room, now, dt);
       checkRoundEnd(room, now);
@@ -1028,6 +1099,74 @@ export function isFull(room: MatchRoom) {
   return teamCount(room, 'azure') >= MAX_TEAM_SIZE && teamCount(room, 'ember') >= MAX_TEAM_SIZE;
 }
 
+/* ------------------------------------------------------------------ bots -- */
+
+const BOT_NAMES = ['HAWK', 'VIPER', 'RAPTOR', 'FALCON', 'COBRA', 'GHOST', 'TALON', 'SABRE', 'PHANTOM', 'KESTREL'];
+
+export function botCount(room: MatchRoom) {
+  let count = 0;
+  for (const player of room.players.values()) if (player.bot) count += 1;
+  return count;
+}
+export function humanCount(room: MatchRoom) { return room.players.size - botCount(room); }
+
+/**
+ * Adds a bot in the lobby, to the given team or the smaller one. A room holds
+ * ten players and always at least one person, so at most nine bots.
+ */
+export function addBot(room: MatchRoom, now: number, team?: Team) {
+  if (room.practice || room.phase !== 'lobby' || room.players.size >= MAX_PLAYERS || !humanCount(room)) return null;
+  const side: Team = team ?? (teamCount(room, 'azure') <= teamCount(room, 'ember') ? 'azure' : 'ember');
+  if (teamCount(room, side) >= MAX_TEAM_SIZE) return null;
+  const taken = new Set([...room.players.values()].map((player) => player.name));
+  const name = BOT_NAMES.map((call) => `BOT ${call}`).find((call) => !taken.has(call)) ?? `BOT ${room.joins}`;
+  return addPlayer(room, { id: `bot-${room.code}-${++room.sequence}`, name, model: room.joins % 2 ? 'bastion' : 'swift', team: side, bot: true }, now);
+}
+
+/** Removes the newest bot (from the given team, if any). Lobby only. */
+export function removeBot(room: MatchRoom, team?: Team) {
+  if (room.phase !== 'lobby') return false;
+  const bots = [...room.players.values()].filter((player) => player.bot && (!team || player.team === team)).sort((a, b) => b.joinOrder - a.joinOrder);
+  if (!bots.length) return false;
+  removePlayer(room, bots[0].id);
+  return true;
+}
+
+/** Bot management from the lobby screen. */
+export function manageBots(room: MatchRoom, action: 'add' | 'remove' | 'fill' | 'clear', now: number, team?: Team) {
+  if (action === 'add') addBot(room, now, team);
+  else if (action === 'remove') removeBot(room, team);
+  else if (action === 'fill') { while (addBot(room, now)); }
+  else if (action === 'clear') { while (removeBot(room)); }
+}
+
+/**
+ * Whether a person can join: a free seat, or, in the lobby, a bot who will
+ * give up theirs. Call makeRoomForHuman just before adding them.
+ */
+export function hasSeatForHuman(room: MatchRoom) {
+  return !isFull(room) || (room.phase === 'lobby' && botCount(room) > 0);
+}
+export function makeRoomForHuman(room: MatchRoom) {
+  if (!isFull(room) || room.phase !== 'lobby') return;
+  // Free the seat on Red if it has a bot: the newcomer then goes to the smaller side.
+  if (!removeBot(room, 'ember')) removeBot(room, 'azure');
+}
+
+/**
+ * Matchmaking: of the public rooms, the one a new player should join. Only
+ * rooms still forming (lobby) or in preparation, where a newcomer is deployed
+ * at once, and with a free seat. Fullest first, so matches start sooner.
+ */
+export function pickOpenRoom(rooms: Iterable<MatchRoom>): MatchRoom | undefined {
+  let best: MatchRoom | undefined;
+  for (const room of rooms) {
+    if (room.practice || !hasSeatForHuman(room) || (room.phase !== 'lobby' && room.phase !== 'prep')) continue;
+    if (!best || room.players.size > best.players.size || (room.players.size === best.players.size && room.phase === 'lobby' && best.phase !== 'lobby')) best = room;
+  }
+  return best;
+}
+
 /** Whole seconds left, rounded up, without float dust turning 300.0000001 into 301. */
 function secondsUntil(at: number, now: number) { return Math.max(0, Math.ceil((at - now) / 1_000 - 1e-6)); }
 
@@ -1049,17 +1188,18 @@ export function snapshotRoom(room: MatchRoom, now: number): RoomState {
     projectiles: room.projectiles.map(({ id, ownerId, team, kind, x, y, z, yaw, pitch, speed, targetId }) => ({ id, ownerId, team, kind, x, y, z, yaw, pitch, speed, targetId })),
     zone: zoneAt(room, now),
     history: room.history.map((record) => ({ ...record })),
+    departed: room.phase === 'complete' ? room.departed.map((player) => ({ ...player })) : [],
     events: room.events.splice(0),
   };
 }
 
 function publicPlayer(player: MatchPlayer): JetState {
   const {
-    id, name, team, model, role, x, y, z, yaw, pitch, roll, speed, hp, alive, kills, deaths, missileCooldown, targetId, q, throttle, gLoad, rollRate,
+    id, name, bot, team, model, role, x, y, z, yaw, pitch, roll, speed, hp, alive, kills, deaths, missileCooldown, missileAmmo, targetId, q, throttle, gLoad, rollRate,
     stall, gcas, burner, station, transit, repairCharges, repairCooldown, repairProgress, loadout, flakAmmo, samAmmo, barrierCooldown, spotted, damage, towerDamage, repaired,
   } = player;
   return {
-    id, name, team, model, role, x, y, z, yaw, pitch, roll, speed, hp, alive, kills, deaths, missileCooldown, targetId, q: [...q] as JetState['q'], throttle, gLoad, rollRate,
+    id, name, bot, team, model, role, x, y, z, yaw, pitch, roll, speed, hp, alive, kills, deaths, missileCooldown, missileAmmo, targetId, q: [...q] as JetState['q'], throttle, gLoad, rollRate,
     stall, gcas, burner, station, transit, repairCharges, repairCooldown, repairProgress, loadout, flakAmmo, samAmmo, barrierCooldown, spotted, damage, towerDamage, repaired,
   };
 }
